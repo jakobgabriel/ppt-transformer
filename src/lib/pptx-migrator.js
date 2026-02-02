@@ -143,6 +143,7 @@ export class PPTXMigrator {
 
   /**
    * Copy template's design elements (theme, master, layouts) to output
+   * Also updates presentation.xml to reference the template's slide master
    */
   async copyTemplateDesign() {
     // Copy theme folder
@@ -172,16 +173,144 @@ export class PPTXMigrator {
       this.outputZip.file(file, content);
     }
 
+    // Copy template's presentation.xml.rels master/theme relationships
+    const templatePresRels = await this.templateZip.file('ppt/_rels/presentation.xml.rels').async('string');
+    let outputPresRels = await this.outputZip.file('ppt/_rels/presentation.xml.rels').async('string');
+
+    // Remove existing slideMaster and theme relationships from output
+    outputPresRels = outputPresRels.replace(/<Relationship[^>]*Type="[^"]*slideMaster"[^>]*\/>/g, '');
+    outputPresRels = outputPresRels.replace(/<Relationship[^>]*Type="[^"]*theme"[^>]*\/>/g, '');
+
+    // Extract master and theme relationships from template
+    const masterRelMatches = templatePresRels.matchAll(/<Relationship[^>]*Type="[^"]*slideMaster"[^>]*\/>/g);
+    const themeRelMatches = templatePresRels.matchAll(/<Relationship[^>]*Type="[^"]*theme"[^>]*\/>/g);
+
+    // Find max rId in output rels
+    let maxRId = 1;
+    const rIdMatches = outputPresRels.matchAll(/Id="rId(\d+)"/g);
+    for (const m of rIdMatches) {
+      const id = parseInt(m[1]);
+      if (id > maxRId) maxRId = id;
+    }
+
+    // Add template's master relationships with new IDs
+    let newRelsXml = '';
+    const masterRIdMap = new Map(); // Map old rId to new rId
+
+    for (const match of masterRelMatches) {
+      const relXml = match[0];
+      const oldRIdMatch = relXml.match(/Id="(rId\d+)"/);
+      const targetMatch = relXml.match(/Target="([^"]+)"/);
+
+      if (oldRIdMatch && targetMatch) {
+        const newRId = `rId${++maxRId}`;
+        masterRIdMap.set(oldRIdMatch[1], newRId);
+        newRelsXml += `\n<Relationship Id="${newRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="${targetMatch[1]}"/>`;
+      }
+    }
+
+    for (const match of themeRelMatches) {
+      const relXml = match[0];
+      const targetMatch = relXml.match(/Target="([^"]+)"/);
+
+      if (targetMatch) {
+        const newRId = `rId${++maxRId}`;
+        newRelsXml += `\n<Relationship Id="${newRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="${targetMatch[1]}"/>`;
+      }
+    }
+
+    outputPresRels = outputPresRels.replace('</Relationships>', `${newRelsXml}\n</Relationships>`);
+    outputPresRels = outputPresRels.replace(/\n\s*\n/g, '\n');
+    this.outputZip.file('ppt/_rels/presentation.xml.rels', outputPresRels);
+
+    // Update presentation.xml's sldMasterIdLst to use template's masters
+    const templatePresXml = await this.templateZip.file('ppt/presentation.xml').async('string');
+    let outputPresXml = await this.outputZip.file('ppt/presentation.xml').async('string');
+
+    // Extract sldMasterIdLst from template
+    const templateMasterListMatch = templatePresXml.match(/<p:sldMasterIdLst>([\s\S]*?)<\/p:sldMasterIdLst>/);
+
+    if (templateMasterListMatch) {
+      // Update the rIds in the master list to use new IDs
+      let newMasterList = templateMasterListMatch[1];
+
+      for (const [oldRId, newRId] of masterRIdMap) {
+        newMasterList = newMasterList.replace(new RegExp(`r:id="${oldRId}"`, 'g'), `r:id="${newRId}"`);
+      }
+
+      // Replace or insert sldMasterIdLst in output
+      if (outputPresXml.includes('<p:sldMasterIdLst>')) {
+        outputPresXml = outputPresXml.replace(
+          /<p:sldMasterIdLst>[\s\S]*?<\/p:sldMasterIdLst>/,
+          `<p:sldMasterIdLst>${newMasterList}</p:sldMasterIdLst>`
+        );
+      } else {
+        // Insert after opening p:presentation tag
+        outputPresXml = outputPresXml.replace(
+          /(<p:presentation[^>]*>)/,
+          `$1\n<p:sldMasterIdLst>${newMasterList}</p:sldMasterIdLst>`
+        );
+      }
+
+      this.outputZip.file('ppt/presentation.xml', outputPresXml);
+    }
+
     // Update Content_Types.xml for theme, masters, layouts
     let contentTypes = await this.outputZip.file('[Content_Types].xml').async('string');
 
-    // Add theme content type if not present
-    if (!contentTypes.includes('ppt/theme/theme1.xml')) {
-      contentTypes = contentTypes.replace('</Types>',
-        '<Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>\n</Types>');
+    // Remove old master/layout/theme overrides
+    contentTypes = contentTypes.replace(/<Override[^>]*PartName="\/ppt\/slideMasters\/[^"]*"[^>]*\/>\s*/g, '');
+    contentTypes = contentTypes.replace(/<Override[^>]*PartName="\/ppt\/slideLayouts\/[^"]*"[^>]*\/>\s*/g, '');
+    contentTypes = contentTypes.replace(/<Override[^>]*PartName="\/ppt\/theme\/[^"]*"[^>]*\/>\s*/g, '');
+
+    // Add content types for template's masters, layouts, themes
+    let newOverrides = '';
+
+    for (const file of masterFiles) {
+      if (file.endsWith('.xml') && !file.includes('_rels')) {
+        newOverrides += `<Override PartName="/${file}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>\n`;
+      }
     }
 
+    for (const file of layoutFiles) {
+      if (file.endsWith('.xml') && !file.includes('_rels')) {
+        newOverrides += `<Override PartName="/${file}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>\n`;
+      }
+    }
+
+    for (const file of themeFiles) {
+      if (file.endsWith('.xml') && !file.includes('_rels')) {
+        newOverrides += `<Override PartName="/${file}" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>\n`;
+      }
+    }
+
+    contentTypes = contentTypes.replace('</Types>', `${newOverrides}</Types>`);
+    contentTypes = contentTypes.replace(/\n\s*\n/g, '\n');
     this.outputZip.file('[Content_Types].xml', contentTypes);
+
+    // Copy any media files from template's master (like logos)
+    const templateMasterRelsFiles = Object.keys(this.templateZip.files).filter(f =>
+      f.startsWith('ppt/slideMasters/_rels/')
+    );
+
+    for (const relsFile of templateMasterRelsFiles) {
+      const relsContent = await this.templateZip.file(relsFile).async('string');
+      const mediaMatches = relsContent.matchAll(/Target="([^"]*media[^"]*)"/g);
+
+      for (const match of mediaMatches) {
+        const mediaTarget = match[1];
+        const mediaPath = mediaTarget.startsWith('../')
+          ? `ppt/${mediaTarget.replace('../', '')}`
+          : `ppt/slideMasters/${mediaTarget}`;
+
+        const mediaFile = this.templateZip.file(mediaPath);
+        if (mediaFile) {
+          const content = await mediaFile.async('nodebuffer');
+          this.outputZip.file(mediaPath, content);
+          await this.ensureContentType(mediaPath);
+        }
+      }
+    }
   }
 
   /**
