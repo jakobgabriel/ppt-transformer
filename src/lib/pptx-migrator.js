@@ -605,28 +605,11 @@ export class PPTXMigrator {
 
   /**
    * Prepare output package by removing template slides
+   * Uses string manipulation to preserve XML structure
    */
   async prepareOutputPackage() {
-    // Parse presentation.xml
-    const presXmlStr = await this.outputZip.file('ppt/presentation.xml').async('string');
-    let presXml = this.parser.parse(presXmlStr);
-
-    // Find and clear sldIdLst
-    const presentation = this.findElement(presXml, 'p:presentation');
-    const sldIdLst = this.findElement(presentation, 'p:sldIdLst');
-
-    if (sldIdLst) {
-      // Remove all p:sldId children
-      if (Array.isArray(sldIdLst)) {
-        for (const item of sldIdLst) {
-          if (item['p:sldId']) {
-            delete item['p:sldId'];
-          }
-        }
-      } else if (sldIdLst['p:sldId']) {
-        delete sldIdLst['p:sldId'];
-      }
-    }
+    // Get presentation.xml as string
+    let presXmlStr = await this.outputZip.file('ppt/presentation.xml').async('string');
 
     // Check slide size
     if (this.sourceAnalysis.slideSize && this.templateAnalysis.slideSize) {
@@ -640,54 +623,63 @@ export class PPTXMigrator {
       }
     }
 
-    // Write updated presentation.xml
-    const updatedPresXml = this.buildXml(presXml);
-    this.outputZip.file('ppt/presentation.xml', updatedPresXml);
+    // Clear sldIdLst content using string replacement (preserve the tag structure)
+    // Match <p:sldIdLst>...</p:sldIdLst> or <p:sldIdLst ...>...</p:sldIdLst>
+    presXmlStr = presXmlStr.replace(
+      /<p:sldIdLst[^>]*>[\s\S]*?<\/p:sldIdLst>/g,
+      '<p:sldIdLst></p:sldIdLst>'
+    );
+    // Also handle self-closing variant
+    presXmlStr = presXmlStr.replace(/<p:sldIdLst\s*\/>/g, '<p:sldIdLst></p:sldIdLst>');
 
-    // Remove existing slides
+    this.outputZip.file('ppt/presentation.xml', presXmlStr);
+
+    // Remove existing template slides from the package
     const slideFiles = Object.keys(this.outputZip.files).filter(f =>
-      f.startsWith('ppt/slides/') && !f.includes('_rels')
+      f.startsWith('ppt/slides/') && f.endsWith('.xml') && !f.includes('_rels')
     );
     const slideRelsFiles = Object.keys(this.outputZip.files).filter(f =>
       f.startsWith('ppt/slides/_rels/')
     );
 
-    for (const file of [...slideFiles, ...slideRelsFiles]) {
+    // Also remove any template notes slides
+    const notesFiles = Object.keys(this.outputZip.files).filter(f =>
+      f.startsWith('ppt/notesSlides/') && f.endsWith('.xml') && !f.includes('_rels')
+    );
+    const notesRelsFiles = Object.keys(this.outputZip.files).filter(f =>
+      f.startsWith('ppt/notesSlides/_rels/')
+    );
+
+    for (const file of [...slideFiles, ...slideRelsFiles, ...notesFiles, ...notesRelsFiles]) {
       this.outputZip.remove(file);
     }
 
-    // Update presentation.xml.rels
+    // Ensure the slides and notesSlides directories exist (add placeholder)
+    // JSZip handles directories implicitly when files are added
+
+    // Update presentation.xml.rels - remove slide relationships using string manipulation
     const presRelsPath = 'ppt/_rels/presentation.xml.rels';
-    const presRelsStr = await this.outputZip.file(presRelsPath).async('string');
-    let presRels = this.parser.parse(presRelsStr);
+    let presRelsStr = await this.outputZip.file(presRelsPath).async('string');
 
-    const relationships = this.findElement(presRels, 'Relationships');
-    if (relationships) {
-      // Filter out slide relationships but keep layout and master refs
-      const rels = this.findAllElements(relationships, 'Relationship');
-      let maxId = 0;
-
-      for (const rel of rels) {
-        const attrs = this.getAttributes(rel);
-        const id = parseInt((attrs.Id || '').replace('rId', ''));
-        if (id > maxId) maxId = id;
-
-        // Remove slide relationships
-        if (attrs.Type?.includes('/slide') && !attrs.Type?.includes('slideLayout') && !attrs.Type?.includes('slideMaster')) {
-          // Mark for removal by clearing
-          if (rel[':@']) {
-            rel[':@']['@_Id'] = '__REMOVE__';
-          }
-        }
-      }
-
-      this.nextRelId = maxId + 1;
+    // Find max relationship ID
+    const idMatches = presRelsStr.matchAll(/Id="rId(\d+)"/g);
+    let maxId = 0;
+    for (const match of idMatches) {
+      const id = parseInt(match[1]);
+      if (id > maxId) maxId = id;
     }
+    this.nextRelId = maxId + 1;
 
-    // Rebuild rels without removed entries
-    const updatedPresRels = this.buildXml(presRels);
-    const cleanedRels = updatedPresRels.replace(/<Relationship[^>]*Id="__REMOVE__"[^>]*\/>/g, '');
-    this.outputZip.file(presRelsPath, cleanedRels);
+    // Remove slide relationships (but keep slideLayout and slideMaster)
+    // Match relationships with Type containing /slide but not /slideLayout or /slideMaster
+    presRelsStr = presRelsStr.replace(
+      /<Relationship[^>]*Type="[^"]*\/slide"[^>]*\/>/g,
+      ''
+    );
+    // Clean up any double newlines
+    presRelsStr = presRelsStr.replace(/\n\s*\n/g, '\n');
+
+    this.outputZip.file(presRelsPath, presRelsStr);
   }
 
   /**
@@ -872,26 +864,20 @@ export class PPTXMigrator {
   async syncContentTypes() {
     let contentTypesStr = await this.outputZip.file('[Content_Types].xml').async('string');
 
-    // Ensure common extensions are present
-    const defaultTypes = [
-      { ext: 'rels', type: 'application/vnd.openxmlformats-package.relationships+xml' },
-      { ext: 'xml', type: 'application/xml' },
-      { ext: 'png', type: 'image/png' },
-      { ext: 'jpg', type: 'image/jpeg' },
-      { ext: 'jpeg', type: 'image/jpeg' },
-      { ext: 'gif', type: 'image/gif' },
-      { ext: 'emf', type: 'image/x-emf' },
-      { ext: 'wmf', type: 'image/x-wmf' }
-    ];
+    // Remove old slide overrides from template (they were deleted)
+    contentTypesStr = contentTypesStr.replace(
+      /<Override[^>]*PartName="\/ppt\/slides\/slide\d+\.xml"[^>]*\/>\s*/g,
+      ''
+    );
 
-    for (const dt of defaultTypes) {
-      if (!contentTypesStr.includes(`Extension="${dt.ext}"`)) {
-        contentTypesStr = contentTypesStr.replace(
-          '<Types ',
-          `<Types ><Default Extension="${dt.ext}" ContentType="${dt.type}"/`
-        ).replace('><Default', '>\n<Default');
-      }
-    }
+    // Remove old notesSlide overrides from template
+    contentTypesStr = contentTypesStr.replace(
+      /<Override[^>]*PartName="\/ppt\/notesSlides\/notesSlide\d+\.xml"[^>]*\/>\s*/g,
+      ''
+    );
+
+    // Clean up extra whitespace
+    contentTypesStr = contentTypesStr.replace(/\n\s*\n/g, '\n');
 
     this.outputZip.file('[Content_Types].xml', contentTypesStr);
   }
