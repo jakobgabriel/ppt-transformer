@@ -994,26 +994,43 @@ export class PPTXMigrator {
 
   /**
    * Find an element in parsed XML (preserveOrder format)
+   * Returns the whole object containing both the element and its :@ attributes
    */
   findElement(parent, tagName) {
     if (!parent) return null;
 
+    // If parent is already a wrapped element, search in its children
+    if (parent._children !== undefined) {
+      return this.findElement(parent._children, tagName);
+    }
+
     if (Array.isArray(parent)) {
       for (const item of parent) {
-        if (item[tagName]) return item[tagName];
-        const found = this.findElement(item, tagName);
-        if (found) return found;
+        // Check if this item has the tag we're looking for
+        if (item && item[tagName] !== undefined) {
+          // Return an object with the children and attributes
+          return { _children: item[tagName], _attrs: item[':@'] || {} };
+        }
+        // Recursively search in children of this item
+        if (item && typeof item === 'object') {
+          for (const key of Object.keys(item)) {
+            if (key === ':@' || key === '#text') continue;
+            const found = this.findElement(item[key], tagName);
+            if (found) return found;
+          }
+        }
       }
       return null;
     }
 
-    if (typeof parent === 'object') {
-      if (parent[tagName]) return parent[tagName];
+    if (typeof parent === 'object' && parent !== null) {
+      if (parent[tagName] !== undefined) {
+        return { _children: parent[tagName], _attrs: parent[':@'] || {} };
+      }
 
       for (const key of Object.keys(parent)) {
         if (key === ':@' || key === '#text') continue;
-        const child = parent[key];
-        const found = this.findElement(child, tagName);
+        const found = this.findElement(parent[key], tagName);
         if (found) return found;
       }
     }
@@ -1029,20 +1046,31 @@ export class PPTXMigrator {
     if (!parent) return results;
 
     const search = (node) => {
+      if (!node) return;
+
+      // If node is a wrapped element, search in its children
+      if (node._children !== undefined) {
+        search(node._children);
+        return;
+      }
+
       if (Array.isArray(node)) {
         for (const item of node) {
-          if (item[tagName]) {
-            const elements = Array.isArray(item[tagName]) ? item[tagName] : [item[tagName]];
-            for (const el of elements) {
-              results.push({ ...el, ':@': item[':@'] });
-            }
+          if (!item || typeof item !== 'object') continue;
+
+          if (item[tagName] !== undefined) {
+            // Push an object with children and attributes
+            results.push({ _children: item[tagName], _attrs: item[':@'] || {} });
           }
-          search(item);
+          // Search deeper in all children
+          for (const key of Object.keys(item)) {
+            if (key === ':@' || key === '#text') continue;
+            search(item[key]);
+          }
         }
-      } else if (typeof node === 'object' && node !== null) {
-        if (node[tagName]) {
-          const elements = Array.isArray(node[tagName]) ? node[tagName] : [node[tagName]];
-          results.push(...elements);
+      } else if (typeof node === 'object') {
+        if (node[tagName] !== undefined) {
+          results.push({ _children: node[tagName], _attrs: node[':@'] || {} });
         }
         for (const key of Object.keys(node)) {
           if (key === ':@' || key === '#text') continue;
@@ -1061,11 +1089,20 @@ export class PPTXMigrator {
   getAttributes(element) {
     if (!element) return {};
 
+    // If it's our wrapped format with _attrs
+    if (element._attrs) {
+      const attrs = {};
+      for (const [key, value] of Object.entries(element._attrs)) {
+        const cleanKey = key.startsWith('@_') ? key.substring(2) : key;
+        attrs[cleanKey] = value;
+      }
+      return attrs;
+    }
+
     // In preserveOrder mode, attributes are in :@ property
     if (element[':@']) {
       const attrs = {};
       for (const [key, value] of Object.entries(element[':@'])) {
-        // Remove @_ prefix
         const cleanKey = key.startsWith('@_') ? key.substring(2) : key;
         attrs[cleanKey] = value;
       }
@@ -1074,12 +1111,23 @@ export class PPTXMigrator {
 
     // Fallback: check for @_ prefixed properties directly
     const attrs = {};
-    for (const [key, value] of Object.entries(element)) {
-      if (key.startsWith('@_')) {
-        attrs[key.substring(2)] = value;
+    if (typeof element === 'object') {
+      for (const [key, value] of Object.entries(element)) {
+        if (key.startsWith('@_')) {
+          attrs[key.substring(2)] = value;
+        }
       }
     }
     return attrs;
+  }
+
+  /**
+   * Get children of an element
+   */
+  getChildren(element) {
+    if (!element) return [];
+    if (element._children !== undefined) return element._children;
+    return element;
   }
 
   /**
@@ -1089,14 +1137,25 @@ export class PPTXMigrator {
     if (!element) return '';
     if (typeof element === 'string') return element;
 
-    if (Array.isArray(element)) {
-      for (const item of element) {
-        if (item['#text']) return item['#text'];
+    const children = this.getChildren(element);
+
+    if (Array.isArray(children)) {
+      for (const item of children) {
+        if (item && item['#text'] !== undefined) {
+          const textNodes = item['#text'];
+          if (Array.isArray(textNodes)) {
+            for (const t of textNodes) {
+              if (t && t['#text']) return t['#text'];
+              if (typeof t === 'string') return t;
+            }
+          }
+          return textNodes;
+        }
       }
       return '';
     }
 
-    if (element['#text']) return element['#text'];
+    if (children && children['#text']) return children['#text'];
     return '';
   }
 
@@ -1106,8 +1165,7 @@ export class PPTXMigrator {
   parseRels(relsXml) {
     if (!relsXml) return [];
 
-    const relationships = this.findElement(relsXml, 'Relationships');
-    const relElements = this.findAllElements(relationships || relsXml, 'Relationship');
+    const relElements = this.findAllElements(relsXml, 'Relationship');
 
     return relElements.map(rel => {
       const attrs = this.getAttributes(rel);
