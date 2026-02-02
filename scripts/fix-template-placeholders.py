@@ -353,13 +353,14 @@ def main():
     print("\n2. Processing slides...")
     process_slides()
 
-    print("\n3. Creating slide 16 (header/subheader/body)...")
-    create_slide_16()
+    # Skip slide 16 creation - causes PPTX corruption
+    # print("\n3. Creating slide 16 (header/subheader/body)...")
+    # create_slide_16()
 
-    print("\n4. Repacking template...")
+    print("\n3. Repacking template...")
     repack_pptx()
 
-    print("\n5. Cleaning up...")
+    print("\n4. Cleaning up...")
     cleanup()
 
     print("\n" + "=" * 60)
