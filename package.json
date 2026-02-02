@@ -1,0 +1,27 @@
+{
+  "name": "ppt-transformer",
+  "version": "1.0.0",
+  "description": "PowerPoint Template Migration Tool - Migrate PPTX presentations to new templates at the OOXML level",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "keywords": [
+    "pptx",
+    "powerpoint",
+    "ooxml",
+    "template",
+    "migration"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "jszip": "^3.10.1",
+    "multer": "^1.4.5-lts.1",
+    "uuid": "^9.0.0",
+    "xml2js": "^0.6.2"
+  }
+}
