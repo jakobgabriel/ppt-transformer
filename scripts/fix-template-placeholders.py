@@ -157,6 +157,132 @@ def add_body_placeholder(slide_content):
 
     return slide_content
 
+
+def add_two_column_body_placeholders(slide_content):
+    """
+    Add two body placeholders for a two-column layout (slide 15).
+    Left column and right column body placeholders.
+
+    Returns:
+        Modified XML string
+    """
+    # Check if slide already has body placeholders
+    if '<p:ph type="body"' in slide_content:
+        print("  Already has body placeholder(s)")
+        return slide_content
+
+    # Two-column body placeholders
+    # Left column: x=457200, y=2000000, width=8200000, height=7000000
+    # Right column: x=9600000, y=2000000, width=8200000, height=7000000
+    left_body = '''<p:sp><p:nvSpPr><p:cNvPr id="101" name="Content Placeholder Left"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="457200" y="2000000"/><a:ext cx="8200000" cy="7000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang="de-DE"/></a:p></p:txBody></p:sp>'''
+
+    right_body = '''<p:sp><p:nvSpPr><p:cNvPr id="102" name="Content Placeholder Right"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="2"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="9600000" y="2000000"/><a:ext cx="8200000" cy="7000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang="de-DE"/></a:p></p:txBody></p:sp>'''
+
+    # Insert before </p:spTree>
+    if '</p:spTree>' in slide_content:
+        slide_content = slide_content.replace(
+            '</p:spTree>',
+            left_body + right_body + '</p:spTree>'
+        )
+        print("  Added two-column body placeholders")
+
+    return slide_content
+
+def create_slide_16():
+    """
+    Create a new slide 16 with header (title), subheader (subTitle), and body placeholders.
+    This is a commonly needed layout for content slides.
+    """
+    slides_dir = os.path.join(TEMP_DIR, 'ppt', 'slides')
+    rels_dir = os.path.join(slides_dir, '_rels')
+
+    # Check if slide16.xml already exists
+    slide16_path = os.path.join(slides_dir, 'slide16.xml')
+    if os.path.exists(slide16_path):
+        print("  slide16.xml already exists, skipping creation")
+        return
+
+    # Slide 16 XML with title, subtitle, and body placeholders
+    # Using same layout reference as slide 13/14 (slideLayout4)
+    slide16_content = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="457200" y="274638"/><a:ext cx="17373600" cy="700000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="de-DE"/><a:t>Header</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="Subtitle 2"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="subTitle" idx="1"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="457200" y="1000000"/><a:ext cx="17373600" cy="500000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="de-DE"/><a:t>Subheader</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="4" name="Content 3"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="2"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="457200" y="1600000"/><a:ext cx="17373600" cy="7400000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang="de-DE"/></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="5" name="Footer Placeholder 4"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="ftr" sz="quarter" idx="11"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="de-DE"/><a:t>Original Equipment Solutions </a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="6" name="Slide Number Placeholder 5"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="sldNum" sz="quarter" idx="12"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:fld id="{DFC702AA-6566-462A-94F4-D9A629CE43FC}" type="slidenum"><a:rPr lang="de-DE" smtClean="0"/><a:t>16</a:t></a:fld><a:endParaRPr lang="de-DE"/></a:p></p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>'''
+
+    # Write slide16.xml
+    with open(slide16_path, 'w', encoding='utf-8') as f:
+        f.write(slide16_content)
+    print("  Created slide16.xml")
+
+    # Create slide16.xml.rels (relationship to layout)
+    slide16_rels = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout5.xml"/></Relationships>'''
+
+    rels_path = os.path.join(rels_dir, 'slide16.xml.rels')
+    with open(rels_path, 'w', encoding='utf-8') as f:
+        f.write(slide16_rels)
+    print("  Created slide16.xml.rels")
+
+    # Update presentation.xml to include slide16
+    pres_path = os.path.join(TEMP_DIR, 'ppt', 'presentation.xml')
+    with open(pres_path, 'r', encoding='utf-8') as f:
+        pres_content = f.read()
+
+    # Find the highest rId for slides and add slide16
+    # Add slide reference to sldIdLst
+    if '</p:sldIdLst>' in pres_content:
+        # Find max slide id
+        import re as regex
+        slide_ids = regex.findall(r'<p:sldId id="(\d+)"', pres_content)
+        max_id = max(int(sid) for sid in slide_ids) if slide_ids else 256
+        new_id = max_id + 1
+
+        # Find max rId
+        rids = regex.findall(r'rId(\d+)', pres_content)
+        max_rid = max(int(rid) for rid in rids) if rids else 10
+        new_rid = max_rid + 1
+
+        # Add slide reference
+        pres_content = pres_content.replace(
+            '</p:sldIdLst>',
+            f'<p:sldId id="{new_id}" r:id="rId{new_rid}"/></p:sldIdLst>'
+        )
+        print(f"  Added slide16 to presentation.xml (id={new_id}, rId{new_rid})")
+
+        with open(pres_path, 'w', encoding='utf-8') as f:
+            f.write(pres_content)
+
+    # Update presentation.xml.rels to add relationship to slide16
+    pres_rels_path = os.path.join(TEMP_DIR, 'ppt', '_rels', 'presentation.xml.rels')
+    with open(pres_rels_path, 'r', encoding='utf-8') as f:
+        pres_rels_content = f.read()
+
+    # Add relationship for slide16
+    if '</Relationships>' in pres_rels_content:
+        pres_rels_content = pres_rels_content.replace(
+            '</Relationships>',
+            f'<Relationship Id="rId{new_rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide16.xml"/></Relationships>'
+        )
+
+        with open(pres_rels_path, 'w', encoding='utf-8') as f:
+            f.write(pres_rels_content)
+        print("  Added slide16 relationship to presentation.xml.rels")
+
+    # Update [Content_Types].xml to include slide16
+    content_types_path = os.path.join(TEMP_DIR, '[Content_Types].xml')
+    with open(content_types_path, 'r', encoding='utf-8') as f:
+        ct_content = f.read()
+
+    # Add override for slide16
+    if '/ppt/slides/slide16.xml' not in ct_content:
+        ct_content = ct_content.replace(
+            '</Types>',
+            '<Override PartName="/ppt/slides/slide16.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>'
+        )
+
+        with open(content_types_path, 'w', encoding='utf-8') as f:
+            f.write(ct_content)
+        print("  Added slide16 to [Content_Types].xml")
+
+
 def process_slides():
     """Process all slides to add placeholders"""
     slides_dir = os.path.join(TEMP_DIR, 'ppt', 'slides')
@@ -186,6 +312,10 @@ def process_slides():
         # For slides 13 and 14, add body placeholder (most used template slides)
         if filename in ['slide13.xml', 'slide14.xml']:
             content = add_body_placeholder(content)
+
+        # For slide 15, add two-column body placeholders
+        if filename == 'slide15.xml':
+            content = add_two_column_body_placeholders(content)
 
         # Write back if changed
         if content != original_content:
@@ -223,10 +353,13 @@ def main():
     print("\n2. Processing slides...")
     process_slides()
 
-    print("\n3. Repacking template...")
+    print("\n3. Creating slide 16 (header/subheader/body)...")
+    create_slide_16()
+
+    print("\n4. Repacking template...")
     repack_pptx()
 
-    print("\n4. Cleaning up...")
+    print("\n5. Cleaning up...")
     cleanup()
 
     print("\n" + "=" * 60)
