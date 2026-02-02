@@ -123,6 +123,40 @@ def remove_warning_boxes(slide_content):
 
     return slide_content
 
+
+def add_body_placeholder(slide_content):
+    """
+    Add a body placeholder to a slide that has title but no body placeholder.
+    Used for slides 13 and 14 which are title-only layouts.
+
+    Returns:
+        Modified XML string
+    """
+    # Check if slide already has a body placeholder
+    if '<p:ph type="body"' in slide_content:
+        print("  Already has body placeholder")
+        return slide_content
+
+    # Check if slide has a title placeholder (required for this to make sense)
+    if '<p:ph type="title"' not in slide_content:
+        print("  No title placeholder found, skipping body placeholder")
+        return slide_content
+
+    # Body placeholder shape to add
+    # Position: below the title, covering most of the slide
+    # Dimensions based on template: x=457200 (same as title), y=1200000, width=17373600, height=7800000
+    body_placeholder = '''<p:sp><p:nvSpPr><p:cNvPr id="100" name="Content Placeholder 100"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="457200" y="1200000"/><a:ext cx="17373600" cy="7800000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang="de-DE"/></a:p></p:txBody></p:sp>'''
+
+    # Insert before </p:spTree>
+    if '</p:spTree>' in slide_content:
+        slide_content = slide_content.replace(
+            '</p:spTree>',
+            body_placeholder + '</p:spTree>'
+        )
+        print("  Added body placeholder")
+
+    return slide_content
+
 def process_slides():
     """Process all slides to add placeholders"""
     slides_dir = os.path.join(TEMP_DIR, 'ppt', 'slides')
@@ -148,6 +182,10 @@ def process_slides():
 
         # Add subtitle placeholder to text boxes with "Subtitel" text
         content = add_placeholder_to_textbox(content, 'Subtitel', 'subTitle')
+
+        # For slides 13 and 14, add body placeholder (most used template slides)
+        if filename in ['slide13.xml', 'slide14.xml']:
+            content = add_body_placeholder(content)
 
         # Write back if changed
         if content != original_content:
