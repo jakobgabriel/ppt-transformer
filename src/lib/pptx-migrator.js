@@ -883,29 +883,118 @@ export class PPTXMigrator {
     let xml = slideXml;
 
     // 1. Remove footer placeholder shapes (date, footer, slide number)
-    // These have <p:ph type="dt"/>, <p:ph type="ftr"/>, <p:ph type="sldNum"/>
-    // Remove the entire <p:sp> element containing these placeholders
-    xml = xml.replace(/<p:sp[^>]*>[\s\S]*?<p:ph[^>]*type="dt"[^>]*\/>[\s\S]*?<\/p:sp>/g, '');
-    xml = xml.replace(/<p:sp[^>]*>[\s\S]*?<p:ph[^>]*type="ftr"[^>]*\/>[\s\S]*?<\/p:sp>/g, '');
-    xml = xml.replace(/<p:sp[^>]*>[\s\S]*?<p:ph[^>]*type="sldNum"[^>]*\/>[\s\S]*?<\/p:sp>/g, '');
-
-    // Also remove shapes that might have footer content without explicit type
-    // Match shapes with names containing "Footer", "Date", "Slide Number"
-    xml = xml.replace(/<p:sp[^>]*>[\s\S]*?<p:cNvPr[^>]*name="[^"]*[Ff]ooter[^"]*"[^>]*\/>[\s\S]*?<\/p:sp>/g, '');
-    xml = xml.replace(/<p:sp[^>]*>[\s\S]*?<p:cNvPr[^>]*name="[^"]*[Dd]ate[^"]*"[^>]*\/>[\s\S]*?<\/p:sp>/g, '');
-    xml = xml.replace(/<p:sp[^>]*>[\s\S]*?<p:cNvPr[^>]*name="[^"]*[Ss]lide\s*[Nn]umber[^"]*"[^>]*\/>[\s\S]*?<\/p:sp>/g, '');
+    // We need to carefully match individual <p:sp>...</p:sp> blocks and check each one
+    xml = this.removeFooterShapes(xml);
 
     // 2. Remove top-right corner images (likely logos)
-    // Standard slide width is ~9144000 EMUs (for 16:9) or ~9144000 (for 4:3)
-    // Top-right means x > 70% of width and y < 20% of height
-    // We'll look for <p:pic> elements and check their position
     xml = this.removeTopRightImages(xml);
 
     // 3. Expand body/content placeholders to use more slide width
-    // This modifies the <a:off> (offset) and <a:ext> (extent) in <a:xfrm>
     xml = this.expandTextAreas(xml);
 
     return xml;
+  }
+
+  /**
+   * Remove footer placeholder shapes (date, footer, slide number)
+   * Uses careful matching to avoid removing content shapes
+   */
+  removeFooterShapes(slideXml) {
+    let xml = slideXml;
+
+    // Footer placeholder types to remove
+    const footerTypes = ['dt', 'ftr', 'sldNum'];
+
+    // Footer-related names to remove (case insensitive check)
+    const footerNames = ['footer', 'date', 'slide number', 'slidenumber', 'page number', 'pagenumber'];
+
+    // Find all <p:sp> elements - use a function to extract them safely
+    // We need to match balanced tags, so we'll process iteratively
+    const shapes = this.extractShapeElements(xml);
+
+    for (const shape of shapes) {
+      let shouldRemove = false;
+
+      // Check for footer placeholder types: <p:ph type="dt|ftr|sldNum"/>
+      for (const footerType of footerTypes) {
+        // Match type attribute with quotes - be strict about matching within this shape only
+        const phRegex = new RegExp(`<p:ph[^>]*type=["']${footerType}["'][^>]*/>`);
+        if (phRegex.test(shape)) {
+          shouldRemove = true;
+          break;
+        }
+      }
+
+      // Check for footer-related names in cNvPr
+      if (!shouldRemove) {
+        const nameMatch = shape.match(/<p:cNvPr[^>]*name=["']([^"']*)["']/);
+        if (nameMatch) {
+          const shapeName = nameMatch[1].toLowerCase();
+          for (const footerName of footerNames) {
+            if (shapeName.includes(footerName)) {
+              shouldRemove = true;
+              break;
+            }
+          }
+        }
+      }
+
+      if (shouldRemove) {
+        xml = xml.replace(shape, '');
+      }
+    }
+
+    return xml;
+  }
+
+  /**
+   * Extract all <p:sp>...</p:sp> elements from XML string
+   * Handles nested elements by tracking tag depth
+   */
+  extractShapeElements(xml) {
+    const shapes = [];
+    const startTag = '<p:sp';
+    const endTag = '</p:sp>';
+
+    let searchStart = 0;
+    while (true) {
+      const startIdx = xml.indexOf(startTag, searchStart);
+      if (startIdx === -1) break;
+
+      // Find the matching closing tag (accounting for nested p:sp is rare, but handle it)
+      let depth = 1;
+      let idx = startIdx + startTag.length;
+
+      while (depth > 0 && idx < xml.length) {
+        const nextStart = xml.indexOf(startTag, idx);
+        const nextEnd = xml.indexOf(endTag, idx);
+
+        if (nextEnd === -1) break; // Malformed XML
+
+        if (nextStart !== -1 && nextStart < nextEnd) {
+          // Found a nested start tag
+          depth++;
+          idx = nextStart + startTag.length;
+        } else {
+          // Found an end tag
+          depth--;
+          if (depth === 0) {
+            const endIdx = nextEnd + endTag.length;
+            shapes.push(xml.substring(startIdx, endIdx));
+            searchStart = endIdx;
+          } else {
+            idx = nextEnd + endTag.length;
+          }
+        }
+      }
+
+      if (depth > 0) {
+        // Couldn't find matching end tag, move past this start tag
+        searchStart = startIdx + startTag.length;
+      }
+    }
+
+    return shapes;
   }
 
   /**
