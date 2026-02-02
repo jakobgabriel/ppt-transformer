@@ -515,33 +515,47 @@ export class PPTXMigrator {
 
   /**
    * Find layout by name (fuzzy match)
+   * Includes German layout names from Template_Transitionsphase_OESL.pptx
    */
   findLayoutByName(sourceName) {
     if (!sourceName) return null;
 
-    const normalized = sourceName.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const normalized = sourceName.toLowerCase().replace(/[^a-z0-9äöüß]/g, '');
 
     // Exact match first
     let match = this.templateAnalysis.layouts.find(l =>
-      l.name.toLowerCase().replace(/[^a-z0-9]/g, '') === normalized
+      l.name.toLowerCase().replace(/[^a-z0-9äöüß]/g, '') === normalized
     );
 
     if (match) return match;
 
-    // Fuzzy match
+    // Fuzzy match - includes German layout names
+    // Template layouts: Titelfolie, Titel und Inhalt, Abschnittsüberschrift, Titel, Titel+Text, Leer
     const fuzzyMappings = {
-      'title': ['title', 'cover', 'opening'],
-      'titleslide': ['titleslide', 'corporatetitle', 'cover'],
-      'twocontent': ['twocontent', 'twocolumn', 'comparison'],
-      'sectionheader': ['sectionheader', 'section', 'sectionbreak', 'divider'],
-      'blank': ['blank', 'empty'],
-      'titleandcontent': ['titleandcontent', 'titlecontent', 'content']
+      // Title slide mappings
+      'title': ['title', 'cover', 'opening', 'titelfolie', 'titel'],
+      'titleslide': ['titleslide', 'corporatetitle', 'cover', 'titelfolie'],
+      'titelfolie': ['titelfolie', 'titleslide', 'title', 'cover'],
+
+      // Content slide mappings
+      'twocontent': ['twocontent', 'twocolumn', 'comparison', 'zweiinhalte'],
+      'titleandcontent': ['titleandcontent', 'titlecontent', 'content', 'titelundinhalt', 'titelinhalt'],
+      'titelundinhalt': ['titelundinhalt', 'titleandcontent', 'content', 'titelinhalt'],
+      'titeltext': ['titeltext', 'titletext', 'titelplustext'],
+
+      // Section header mappings
+      'sectionheader': ['sectionheader', 'section', 'sectionbreak', 'divider', 'abschnitt', 'abschnittsüberschrift'],
+      'abschnitt': ['abschnitt', 'abschnittsüberschrift', 'sectionheader', 'section'],
+
+      // Blank slide mappings
+      'blank': ['blank', 'empty', 'leer'],
+      'leer': ['leer', 'blank', 'empty']
     };
 
     for (const [key, values] of Object.entries(fuzzyMappings)) {
       if (normalized.includes(key) || values.some(v => normalized.includes(v))) {
         match = this.templateAnalysis.layouts.find(l => {
-          const targetNorm = l.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const targetNorm = l.name.toLowerCase().replace(/[^a-z0-9äöüß]/g, '');
           return values.some(v => targetNorm.includes(v));
         });
         if (match) return match;
@@ -898,12 +912,13 @@ export class PPTXMigrator {
    * Remove images positioned in the top-right corner (likely logos)
    */
   removeTopRightImages(slideXml) {
-    // Parse pictures and check their positions
-    // Standard slide dimensions: 9144000 x 6858000 EMUs (for 4:3) or 12192000 x 6858000 (for 16:9)
-    // We consider top-right as: x > 6500000 (roughly 70% for 16:9) and y < 1500000 (roughly 20%)
+    // Optimized for Template_Transitionsphase_OESL.pptx
+    // Slide dimensions: 18288000 x 10287000 EMUs (16:9 widescreen, 20" x 11.25")
+    // Logo in template master is at x=15949416, y=268121
+    // We consider top-right as: x > 14000000 (~75% from left) and y < 2000000 (~20% from top)
 
-    const topRightThresholdX = 6500000; // ~70% from left for 16:9 slides
-    const topRightThresholdY = 1500000; // ~20% from top
+    const topRightThresholdX = 14000000; // ~75% from left for this wide slide
+    const topRightThresholdY = 2000000;  // ~20% from top
 
     let xml = slideXml;
 
@@ -918,7 +933,7 @@ export class PPTXMigrator {
         const x = parseInt(offMatch[1]);
         const y = parseInt(offMatch[2]);
 
-        // Check if in top-right corner
+        // Check if in top-right corner (likely a logo)
         if (x > topRightThresholdX && y < topRightThresholdY) {
           // Remove this picture
           xml = xml.replace(pic, '');
@@ -931,25 +946,19 @@ export class PPTXMigrator {
 
   /**
    * Expand text/body placeholder areas to use more of the slide
+   * Optimized for Template_Transitionsphase_OESL.pptx (18288000 x 10287000 EMUs)
    */
   expandTextAreas(slideXml) {
     let xml = slideXml;
 
-    // Target: body placeholders (type="body" or no type which defaults to body)
-    // We want to:
-    // - Move content closer to left edge (reduce x offset)
-    // - Expand width to use more horizontal space
-    //
-    // Standard margins: ~500000 EMUs from edges
-    // New margins: ~300000 EMUs for more space
+    // Template dimensions: 18288000 x 10287000 EMUs
+    // Template body placeholder: x=1257300, y=2738438, width=15773400, height=6527800
+    // We want to expand content to use similar positioning but full width
 
-    const newLeftMargin = 457200;   // ~0.5 inch from left
-    const newRightMargin = 457200;  // ~0.5 inch from right
-    const slideWidth = 9144000;     // Standard 4:3 width, will be adjusted for actual slides
-
-    // Find body placeholder shapes and expand them
-    // This is tricky because we need to modify nested XML
-    // We'll use a simpler approach: adjust any xfrm that has large x offset and limited width
+    const slideWidth = 18288000;         // Template slide width
+    const newLeftMargin = 914400;        // ~1 inch from left (consistent with template)
+    const newRightMargin = 914400;       // ~1 inch from right
+    const maxContentWidth = slideWidth - newLeftMargin - newRightMargin; // ~16459200
 
     // Match <a:xfrm> blocks within <p:sp> elements that contain body placeholders
     const spRegex = /<p:sp\b[^>]*>[\s\S]*?<\/p:sp>/g;
@@ -959,8 +968,9 @@ export class PPTXMigrator {
       // Check if this is a body/content placeholder (not title, not footer types)
       const isTitle = /<p:ph[^>]*type="(title|ctrTitle)"/.test(shape);
       const isFooter = /<p:ph[^>]*type="(dt|ftr|sldNum)"/.test(shape);
+      const isSubtitle = /<p:ph[^>]*type="subTitle"/.test(shape);
 
-      if (isTitle || isFooter) continue;
+      if (isTitle || isFooter || isSubtitle) continue;
 
       // Check if it has a text body (indicates content shape)
       if (!/<p:txBody/.test(shape)) continue;
@@ -980,12 +990,12 @@ export class PPTXMigrator {
       const currentWidth = parseInt(extMatch[1]);
       const currentHeight = parseInt(extMatch[2]);
 
-      // Only expand if width is less than 80% of slide
-      if (currentWidth > slideWidth * 0.8) continue;
+      // Only expand if width is less than 85% of max content width
+      if (currentWidth > maxContentWidth * 0.85) continue;
 
       // Calculate new dimensions - expand to fill more space
       const newX = newLeftMargin;
-      const newWidth = slideWidth - newLeftMargin - newRightMargin;
+      const newWidth = maxContentWidth;
 
       // Create new xfrm content
       const newXfrm = xfrmContent
