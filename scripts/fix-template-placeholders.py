@@ -309,13 +309,14 @@ def process_slides():
         # Add subtitle placeholder to text boxes with "Subtitel" text
         content = add_placeholder_to_textbox(content, 'Subtitel', 'subTitle')
 
-        # For slides 13 and 14, add body placeholder (most used template slides)
-        if filename in ['slide13.xml', 'slide14.xml']:
-            content = add_body_placeholder(content)
+        # Disabled - body placeholders cause corruption
+        # # For slides 13 and 14, add body placeholder (most used template slides)
+        # if filename in ['slide13.xml', 'slide14.xml']:
+        #     content = add_body_placeholder(content)
 
-        # For slide 15, add two-column body placeholders
-        if filename == 'slide15.xml':
-            content = add_two_column_body_placeholders(content)
+        # # For slide 15, add two-column body placeholders
+        # if filename == 'slide15.xml':
+        #     content = add_two_column_body_placeholders(content)
 
         # Write back if changed
         if content != original_content:
