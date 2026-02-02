@@ -1,6 +1,7 @@
 import express from 'express';
 import multer from 'multer';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { PPTXMigrator } from './lib/pptx-migrator.js';
 
@@ -9,6 +10,23 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Default template path
+const DEFAULT_TEMPLATE_PATH = path.join(__dirname, '../template/Template_Transitionsphase_OESL.pptx');
+const DEFAULT_TEMPLATE_NAME = 'Template_Transitionsphase_OESL.pptx';
+
+// Check if default template exists
+function hasDefaultTemplate() {
+  return fs.existsSync(DEFAULT_TEMPLATE_PATH);
+}
+
+// Load default template as buffer
+function loadDefaultTemplate() {
+  if (!hasDefaultTemplate()) {
+    throw new Error('Default template not found');
+  }
+  return fs.readFileSync(DEFAULT_TEMPLATE_PATH);
+}
 
 // Configure multer for file uploads
 const storage = multer.memoryStorage();
@@ -35,20 +53,47 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Get default template info
+app.get('/api/default-template', (req, res) => {
+  const exists = hasDefaultTemplate();
+  res.json({
+    available: exists,
+    name: exists ? DEFAULT_TEMPLATE_NAME : null,
+    description: exists ? 'Transitionsphase OESL Template (16:9, German layouts)' : null
+  });
+});
+
 // Analyze endpoint - analyze files and return migration plan
 app.post('/api/analyze', upload.fields([
   { name: 'source', maxCount: 1 },
   { name: 'template', maxCount: 1 }
 ]), async (req, res) => {
   try {
-    if (!req.files?.source?.[0] || !req.files?.template?.[0]) {
+    if (!req.files?.source?.[0]) {
       return res.status(400).json({
-        error: 'Both source presentation and template are required'
+        error: 'Source presentation is required'
+      });
+    }
+
+    const useDefaultTemplate = req.body?.useDefaultTemplate === 'true';
+
+    // Get template buffer - either from upload or default
+    let templateBuffer;
+    let templateName;
+
+    if (req.files?.template?.[0]) {
+      templateBuffer = req.files.template[0].buffer;
+      templateName = req.files.template[0].originalname;
+    } else if (useDefaultTemplate && hasDefaultTemplate()) {
+      templateBuffer = loadDefaultTemplate();
+      templateName = DEFAULT_TEMPLATE_NAME;
+    } else {
+      return res.status(400).json({
+        error: 'Template is required. Either upload a template or use the default template.'
       });
     }
 
     const sourceBuffer = req.files.source[0].buffer;
-    const templateBuffer = req.files.template[0].buffer;
 
     const migrator = new PPTXMigrator();
 
@@ -82,7 +127,7 @@ app.post('/api/analyze', upload.fields([
         }))
       },
       template: {
-        filename: req.files.template[0].originalname,
+        filename: templateName,
         layoutCount: migrator.templateAnalysis.layouts.length,
         slideSize: migrator.templateAnalysis.slideSize,
         layouts: migrator.templateAnalysis.layouts.map(l => ({
@@ -118,14 +163,28 @@ app.post('/api/migrate', upload.fields([
   { name: 'template', maxCount: 1 }
 ]), async (req, res) => {
   try {
-    if (!req.files?.source?.[0] || !req.files?.template?.[0]) {
+    if (!req.files?.source?.[0]) {
       return res.status(400).json({
-        error: 'Both source presentation and template are required'
+        error: 'Source presentation is required'
+      });
+    }
+
+    const useDefaultTemplate = req.body?.useDefaultTemplate === 'true';
+
+    // Get template buffer - either from upload or default
+    let templateBuffer;
+
+    if (req.files?.template?.[0]) {
+      templateBuffer = req.files.template[0].buffer;
+    } else if (useDefaultTemplate && hasDefaultTemplate()) {
+      templateBuffer = loadDefaultTemplate();
+    } else {
+      return res.status(400).json({
+        error: 'Template is required. Either upload a template or use the default template.'
       });
     }
 
     const sourceBuffer = req.files.source[0].buffer;
-    const templateBuffer = req.files.template[0].buffer;
     const mappingInstructions = req.body?.mappingInstructions || null;
 
     const migrator = new PPTXMigrator();
@@ -188,9 +247,16 @@ app.listen(PORT, () => {
   console.log(`PPTX Template Migrator running at http://localhost:${PORT}`);
   console.log('');
   console.log('Endpoints:');
-  console.log('  GET  /              - Web interface');
-  console.log('  POST /api/analyze   - Analyze files and get migration plan');
-  console.log('  POST /api/migrate   - Perform migration and download result');
+  console.log('  GET  /                    - Web interface');
+  console.log('  GET  /api/default-template - Get default template info');
+  console.log('  POST /api/analyze         - Analyze files and get migration plan');
+  console.log('  POST /api/migrate         - Perform migration and download result');
+  console.log('');
+  if (hasDefaultTemplate()) {
+    console.log(`Default template: ${DEFAULT_TEMPLATE_NAME}`);
+  } else {
+    console.log('No default template found. Users must upload a template.');
+  }
   console.log('');
 });
 
