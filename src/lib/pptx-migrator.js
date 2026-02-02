@@ -725,72 +725,59 @@ export class PPTXMigrator {
 
   /**
    * Migrate a single slide
+   * Preserves original relationship IDs to maintain all formatting and references
    */
   async migrateSlide(sourceSlide, targetLayout, slideNumber) {
     const slideFileName = `slide${slideNumber}.xml`;
     const slidePath = `ppt/slides/${slideFileName}`;
     const slideRelsPath = `ppt/slides/_rels/${slideFileName}.rels`;
 
-    // Copy the raw slide XML from source
-    let slideXml = sourceSlide.rawXml;
-
-    // Update any layout-specific references if needed
-    // The slide content itself is preserved as-is
-
-    // Write slide XML
+    // Copy the raw slide XML exactly as-is (preserves all formatting)
+    const slideXml = sourceSlide.rawXml;
     this.outputZip.file(slidePath, slideXml);
 
-    // Create slide relationships
-    const layoutRelPath = `../slideLayouts/${targetLayout.file}`;
+    // Get the original slide rels file as string and modify it
+    const sourceSlideRelsPath = sourceSlide.path.replace('slides/', 'slides/_rels/') + '.rels';
+    const sourceRelsFile = this.sourceZip.file(sourceSlideRelsPath);
 
-    // Parse source rels to get media and other references
-    let slideRelsContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="${layoutRelPath}"/>`;
+    let slideRelsContent;
+    let maxRelId = 1;
 
-    let nextRelId = 2;
+    if (sourceRelsFile) {
+      // Copy the original rels file and only change the layout target
+      slideRelsContent = await sourceRelsFile.async('string');
 
-    // Copy relationships from source (excluding layout)
-    if (sourceSlide.rawRels) {
-      const sourceRels = this.parseRels(sourceSlide.rawRels);
+      // Find all relationship IDs to track the max
+      const idMatches = slideRelsContent.matchAll(/Id="rId(\d+)"/g);
+      for (const match of idMatches) {
+        const id = parseInt(match[1]);
+        if (id > maxRelId) maxRelId = id;
+      }
 
+      // Update the slideLayout relationship target to point to the new template layout
+      const newLayoutTarget = `../slideLayouts/${targetLayout.file}`;
+      slideRelsContent = slideRelsContent.replace(
+        /(<Relationship[^>]*Type="[^"]*slideLayout"[^>]*Target=")[^"]*(")/g,
+        `$1${newLayoutTarget}$2`
+      );
+
+      // Copy all referenced media files from source to output
+      const sourceRels = this.parseRels(await this.parseXmlFile(this.sourceZip, sourceSlideRelsPath));
       for (const rel of sourceRels) {
-        // Skip layout relationship (we use our own)
+        // Skip layout - we already handled it
         if (rel.Type?.includes('slideLayout')) continue;
 
-        // Copy the relationship
-        const newRelId = `rId${nextRelId++}`;
-
-        // Copy referenced file if it exists
-        let targetPath = rel.Target;
-        if (targetPath.startsWith('../')) {
-          const sourcePath = `ppt/${targetPath.replace('../', '')}`;
-          const sourceFile = this.sourceZip.file(sourcePath);
-          if (sourceFile) {
-            const content = await sourceFile.async('nodebuffer');
-            this.outputZip.file(sourcePath, content);
-
-            // Register in Content_Types if needed
-            await this.ensureContentType(sourcePath);
-          }
-        }
-
-        const targetModeAttr = rel.TargetMode ? ` TargetMode="${rel.TargetMode}"` : '';
-        slideRelsContent += `\n<Relationship Id="${newRelId}" Type="${rel.Type}" Target="${rel.Target}"${targetModeAttr}/>`;
-
-        // Update the slide XML with new rel ID if needed
-        if (rel.Id !== newRelId) {
-          slideXml = slideXml.replace(new RegExp(`r:id="${rel.Id}"`, 'g'), `r:id="${newRelId}"`);
-          slideXml = slideXml.replace(new RegExp(`r:embed="${rel.Id}"`, 'g'), `r:embed="${newRelId}"`);
-          slideXml = slideXml.replace(new RegExp(`r:link="${rel.Id}"`, 'g'), `r:link="${newRelId}"`);
-        }
+        // Copy referenced files
+        await this.copyRelatedFile(rel.Target, 'ppt/slides');
       }
+    } else {
+      // No source rels - create minimal rels with just layout
+      const layoutRelPath = `../slideLayouts/${targetLayout.file}`;
+      slideRelsContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="${layoutRelPath}"/>
+</Relationships>`;
     }
-
-    slideRelsContent += '\n</Relationships>';
-
-    // Update the slide file with corrected rel IDs
-    this.outputZip.file(slidePath, slideXml);
 
     // Write slide rels
     this.outputZip.file(slideRelsPath, slideRelsContent);
@@ -801,28 +788,46 @@ export class PPTXMigrator {
       const notesPath = `ppt/notesSlides/${notesFileName}`;
       const notesRelsPath = `ppt/notesSlides/_rels/${notesFileName}.rels`;
 
-      // Update notes to reference new slide
+      // Copy notes XML, updating the slide reference
       let notesXml = sourceSlide.notes;
-      // Notes reference the slide - update if path changed
-      notesXml = notesXml.replace(/Target="[^"]*slide\d+\.xml"/g, `Target="../slides/${slideFileName}"`);
+      notesXml = notesXml.replace(
+        /(<Relationship[^>]*Type="[^"]*\/slide"[^>]*Target=")[^"]*(")/g,
+        `$1../slides/${slideFileName}$2`
+      );
 
       this.outputZip.file(notesPath, notesXml);
 
-      // Notes rels
-      const notesRelsContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+      // Copy the original notes rels if it exists
+      const sourceNotesRelsPath = sourceSlide.notesPath.replace('notesSlides/', 'notesSlides/_rels/') + '.rels';
+      const sourceNotesRelsFile = this.sourceZip.file(sourceNotesRelsPath);
+
+      if (sourceNotesRelsFile) {
+        let notesRelsContent = await sourceNotesRelsFile.async('string');
+        // Update slide reference
+        notesRelsContent = notesRelsContent.replace(
+          /(<Relationship[^>]*Type="[^"]*\/slide"[^>]*Target=")[^"]*(")/g,
+          `$1../slides/${slideFileName}$2`
+        );
+        this.outputZip.file(notesRelsPath, notesRelsContent);
+      } else {
+        // Create minimal notes rels
+        const notesRelsContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="../slides/${slideFileName}"/>
 </Relationships>`;
+        this.outputZip.file(notesRelsPath, notesRelsContent);
+      }
 
-      this.outputZip.file(notesRelsPath, notesRelsContent);
-
-      // Add notes relationship to slide rels
-      slideRelsContent = slideRelsContent.replace(
-        '</Relationships>',
-        `<Relationship Id="rId${nextRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/${notesFileName}"/>
+      // Add notes relationship to slide rels if not already present
+      if (!slideRelsContent.includes('notesSlide')) {
+        const notesRelId = `rId${maxRelId + 1}`;
+        slideRelsContent = slideRelsContent.replace(
+          '</Relationships>',
+          `<Relationship Id="${notesRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/${notesFileName}"/>
 </Relationships>`
-      );
-      this.outputZip.file(slideRelsPath, slideRelsContent);
+        );
+        this.outputZip.file(slideRelsPath, slideRelsContent);
+      }
 
       await this.ensureContentType(notesPath, 'application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml');
     }
@@ -836,7 +841,6 @@ export class PPTXMigrator {
 
     const slideRelId = `rId${this.nextRelId++}`;
 
-    // Add new relationship
     presRelsStr = presRelsStr.replace(
       '</Relationships>',
       `<Relationship Id="${slideRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/${slideFileName}"/>
@@ -917,6 +921,49 @@ export class PPTXMigrator {
 </Types>`
       );
       this.outputZip.file('[Content_Types].xml', contentTypesStr);
+    }
+  }
+
+  /**
+   * Copy a related file from source to output
+   * Handles relative paths from relationship targets
+   */
+  async copyRelatedFile(targetPath, baseDir) {
+    if (!targetPath) return;
+
+    // Skip external URLs
+    if (targetPath.startsWith('http://') || targetPath.startsWith('https://')) {
+      return;
+    }
+
+    // Resolve the full path
+    let sourcePath;
+    if (targetPath.startsWith('../')) {
+      // Relative path like ../media/image1.png
+      sourcePath = `ppt/${targetPath.replace('../', '')}`;
+    } else if (targetPath.startsWith('/')) {
+      // Absolute path
+      sourcePath = targetPath.substring(1);
+    } else {
+      // Relative to base dir
+      sourcePath = `${baseDir}/${targetPath}`;
+    }
+
+    // Normalize the path
+    sourcePath = sourcePath.replace(/\/+/g, '/');
+
+    // Check if file exists in source
+    const sourceFile = this.sourceZip.file(sourcePath);
+    if (sourceFile) {
+      try {
+        const content = await sourceFile.async('nodebuffer');
+        this.outputZip.file(sourcePath, content);
+
+        // Ensure content type is registered for media files
+        await this.ensureContentType(sourcePath);
+      } catch (e) {
+        console.error(`Failed to copy file ${sourcePath}:`, e.message);
+      }
     }
   }
 
