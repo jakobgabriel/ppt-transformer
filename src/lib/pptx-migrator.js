@@ -732,8 +732,12 @@ export class PPTXMigrator {
     const slidePath = `ppt/slides/${slideFileName}`;
     const slideRelsPath = `ppt/slides/_rels/${slideFileName}.rels`;
 
-    // Copy the raw slide XML exactly as-is (preserves all formatting)
-    const slideXml = sourceSlide.rawXml;
+    // Copy the raw slide XML and apply cleanups
+    let slideXml = sourceSlide.rawXml;
+
+    // Clean up the slide: remove footers, logos, expand text areas
+    slideXml = this.cleanupSlideXml(slideXml);
+
     this.outputZip.file(slidePath, slideXml);
 
     // Get the original slide rels file as string and modify it
@@ -853,6 +857,147 @@ export class PPTXMigrator {
       id: this.nextSlideId++,
       rId: slideRelId
     };
+  }
+
+  /**
+   * Clean up slide XML:
+   * - Remove footer elements (date, slide number, footer text)
+   * - Remove top-right corner images (likely logos)
+   * - Expand text body areas to use more slide space
+   */
+  cleanupSlideXml(slideXml) {
+    let xml = slideXml;
+
+    // 1. Remove footer placeholder shapes (date, footer, slide number)
+    // These have <p:ph type="dt"/>, <p:ph type="ftr"/>, <p:ph type="sldNum"/>
+    // Remove the entire <p:sp> element containing these placeholders
+    xml = xml.replace(/<p:sp[^>]*>[\s\S]*?<p:ph[^>]*type="dt"[^>]*\/>[\s\S]*?<\/p:sp>/g, '');
+    xml = xml.replace(/<p:sp[^>]*>[\s\S]*?<p:ph[^>]*type="ftr"[^>]*\/>[\s\S]*?<\/p:sp>/g, '');
+    xml = xml.replace(/<p:sp[^>]*>[\s\S]*?<p:ph[^>]*type="sldNum"[^>]*\/>[\s\S]*?<\/p:sp>/g, '');
+
+    // Also remove shapes that might have footer content without explicit type
+    // Match shapes with names containing "Footer", "Date", "Slide Number"
+    xml = xml.replace(/<p:sp[^>]*>[\s\S]*?<p:cNvPr[^>]*name="[^"]*[Ff]ooter[^"]*"[^>]*\/>[\s\S]*?<\/p:sp>/g, '');
+    xml = xml.replace(/<p:sp[^>]*>[\s\S]*?<p:cNvPr[^>]*name="[^"]*[Dd]ate[^"]*"[^>]*\/>[\s\S]*?<\/p:sp>/g, '');
+    xml = xml.replace(/<p:sp[^>]*>[\s\S]*?<p:cNvPr[^>]*name="[^"]*[Ss]lide\s*[Nn]umber[^"]*"[^>]*\/>[\s\S]*?<\/p:sp>/g, '');
+
+    // 2. Remove top-right corner images (likely logos)
+    // Standard slide width is ~9144000 EMUs (for 16:9) or ~9144000 (for 4:3)
+    // Top-right means x > 70% of width and y < 20% of height
+    // We'll look for <p:pic> elements and check their position
+    xml = this.removeTopRightImages(xml);
+
+    // 3. Expand body/content placeholders to use more slide width
+    // This modifies the <a:off> (offset) and <a:ext> (extent) in <a:xfrm>
+    xml = this.expandTextAreas(xml);
+
+    return xml;
+  }
+
+  /**
+   * Remove images positioned in the top-right corner (likely logos)
+   */
+  removeTopRightImages(slideXml) {
+    // Parse pictures and check their positions
+    // Standard slide dimensions: 9144000 x 6858000 EMUs (for 4:3) or 12192000 x 6858000 (for 16:9)
+    // We consider top-right as: x > 6500000 (roughly 70% for 16:9) and y < 1500000 (roughly 20%)
+
+    const topRightThresholdX = 6500000; // ~70% from left for 16:9 slides
+    const topRightThresholdY = 1500000; // ~20% from top
+
+    let xml = slideXml;
+
+    // Find all p:pic elements
+    const picRegex = /<p:pic[^>]*>[\s\S]*?<\/p:pic>/g;
+    const pics = xml.match(picRegex) || [];
+
+    for (const pic of pics) {
+      // Extract position from <a:off x="..." y="..."/>
+      const offMatch = pic.match(/<a:off[^>]*x="(\d+)"[^>]*y="(\d+)"/);
+      if (offMatch) {
+        const x = parseInt(offMatch[1]);
+        const y = parseInt(offMatch[2]);
+
+        // Check if in top-right corner
+        if (x > topRightThresholdX && y < topRightThresholdY) {
+          // Remove this picture
+          xml = xml.replace(pic, '');
+        }
+      }
+    }
+
+    return xml;
+  }
+
+  /**
+   * Expand text/body placeholder areas to use more of the slide
+   */
+  expandTextAreas(slideXml) {
+    let xml = slideXml;
+
+    // Target: body placeholders (type="body" or no type which defaults to body)
+    // We want to:
+    // - Move content closer to left edge (reduce x offset)
+    // - Expand width to use more horizontal space
+    //
+    // Standard margins: ~500000 EMUs from edges
+    // New margins: ~300000 EMUs for more space
+
+    const newLeftMargin = 457200;   // ~0.5 inch from left
+    const newRightMargin = 457200;  // ~0.5 inch from right
+    const slideWidth = 9144000;     // Standard 4:3 width, will be adjusted for actual slides
+
+    // Find body placeholder shapes and expand them
+    // This is tricky because we need to modify nested XML
+    // We'll use a simpler approach: adjust any xfrm that has large x offset and limited width
+
+    // Match <a:xfrm> blocks within <p:sp> elements that contain body placeholders
+    const spRegex = /<p:sp\b[^>]*>[\s\S]*?<\/p:sp>/g;
+    const shapes = xml.match(spRegex) || [];
+
+    for (const shape of shapes) {
+      // Check if this is a body/content placeholder (not title, not footer types)
+      const isTitle = /<p:ph[^>]*type="(title|ctrTitle)"/.test(shape);
+      const isFooter = /<p:ph[^>]*type="(dt|ftr|sldNum)"/.test(shape);
+
+      if (isTitle || isFooter) continue;
+
+      // Check if it has a text body (indicates content shape)
+      if (!/<p:txBody/.test(shape)) continue;
+
+      // Find and modify the xfrm
+      const xfrmMatch = shape.match(/<a:xfrm[^>]*>([\s\S]*?)<\/a:xfrm>/);
+      if (!xfrmMatch) continue;
+
+      const xfrmContent = xfrmMatch[0];
+      const offMatch = xfrmContent.match(/<a:off[^>]*x="(\d+)"[^>]*y="(\d+)"[^>]*\/>/);
+      const extMatch = xfrmContent.match(/<a:ext[^>]*cx="(\d+)"[^>]*cy="(\d+)"[^>]*\/>/);
+
+      if (!offMatch || !extMatch) continue;
+
+      const currentX = parseInt(offMatch[1]);
+      const currentY = parseInt(offMatch[2]);
+      const currentWidth = parseInt(extMatch[1]);
+      const currentHeight = parseInt(extMatch[2]);
+
+      // Only expand if width is less than 80% of slide
+      if (currentWidth > slideWidth * 0.8) continue;
+
+      // Calculate new dimensions - expand to fill more space
+      const newX = newLeftMargin;
+      const newWidth = slideWidth - newLeftMargin - newRightMargin;
+
+      // Create new xfrm content
+      const newXfrm = xfrmContent
+        .replace(/<a:off[^>]*\/>/, `<a:off x="${newX}" y="${currentY}"/>`)
+        .replace(/<a:ext[^>]*\/>/, `<a:ext cx="${newWidth}" cy="${currentHeight}"/>`);
+
+      // Replace in original shape
+      const newShape = shape.replace(xfrmContent, newXfrm);
+      xml = xml.replace(shape, newShape);
+    }
+
+    return xml;
   }
 
   /**
