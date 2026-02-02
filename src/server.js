@@ -214,6 +214,63 @@ app.post('/api/migrate', upload.fields([
   }
 });
 
+// Prepend title endpoint - adds title slide and applies template background
+app.post('/api/prepend-title', upload.fields([
+  { name: 'source', maxCount: 1 },
+  { name: 'template', maxCount: 1 }
+]), async (req, res) => {
+  try {
+    if (!req.files?.source?.[0]) {
+      return res.status(400).json({
+        error: 'Source presentation is required'
+      });
+    }
+
+    const useDefaultTemplate = req.body?.useDefaultTemplate === 'true';
+
+    // Get template buffer - either from upload or default
+    let templateBuffer;
+
+    if (req.files?.template?.[0]) {
+      templateBuffer = req.files.template[0].buffer;
+    } else if (useDefaultTemplate && hasDefaultTemplate()) {
+      templateBuffer = loadDefaultTemplate();
+    } else {
+      return res.status(400).json({
+        error: 'Template is required. Either upload a template or use the default template.'
+      });
+    }
+
+    const sourceBuffer = req.files.source[0].buffer;
+    const titleText = req.body?.titleText || null;
+
+    const migrator = new PPTXMigrator();
+    const result = await migrator.prependTitleSlide(sourceBuffer, templateBuffer, titleText);
+
+    // Generate output filename
+    const sourceBasename = path.basename(
+      req.files.source[0].originalname,
+      '.pptx'
+    );
+    const outputFilename = `${sourceBasename}_with_title.pptx`;
+
+    // Send the file
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.presentationml.presentation');
+    res.setHeader('Content-Disposition', `attachment; filename="${outputFilename}"`);
+    res.setHeader('X-Migration-Report', encodeURIComponent(JSON.stringify(result.report)));
+
+    res.send(result.buffer);
+
+  } catch (error) {
+    console.error('Prepend title error:', error);
+    res.status(500).json({
+      error: 'Prepend title failed',
+      message: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
 // Error handling middleware
 app.use((error, req, res, next) => {
   if (error instanceof multer.MulterError) {
@@ -250,7 +307,8 @@ app.listen(PORT, () => {
   console.log('  GET  /                    - Web interface');
   console.log('  GET  /api/default-template - Get default template info');
   console.log('  POST /api/analyze         - Analyze files and get migration plan');
-  console.log('  POST /api/migrate         - Perform migration and download result');
+  console.log('  POST /api/migrate         - Full migration to new template');
+  console.log('  POST /api/prepend-title   - Add title slide + apply background only');
   console.log('');
   if (hasDefaultTemplate()) {
     console.log(`Default template: ${DEFAULT_TEMPLATE_NAME}`);

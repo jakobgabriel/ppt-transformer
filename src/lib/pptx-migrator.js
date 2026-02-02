@@ -90,6 +90,430 @@ export class PPTXMigrator {
   }
 
   /**
+   * Prepend title slide and apply template background
+   * This mode keeps existing slides mostly intact but:
+   * 1. Adds the template's title slide at the beginning
+   * 2. Applies the template's background/master styling to all slides
+   */
+  async prependTitleSlide(sourceBuffer, templateBuffer, titleText = null) {
+    this.sourceZip = await JSZip.loadAsync(sourceBuffer);
+    this.templateZip = await JSZip.loadAsync(templateBuffer);
+
+    // Start output from source (preserve original content)
+    this.outputZip = await JSZip.loadAsync(sourceBuffer);
+
+    // Analyze both
+    this.templateAnalysis = await this.analyzeTemplate(this.templateZip);
+    this.sourceAnalysis = await this.analyzeSource(this.sourceZip);
+
+    // Copy template's theme, slide master, and layouts to output
+    await this.copyTemplateDesign();
+
+    // Get the title slide from template
+    const titleSlideContent = await this.extractTemplateTitleSlide(titleText);
+
+    // Insert title slide at the beginning and renumber existing slides
+    await this.insertTitleSlideAtBeginning(titleSlideContent);
+
+    // Update all existing slides to use template's slide master/layouts
+    await this.applyTemplateBackgroundToSlides();
+
+    // Sync content types
+    await this.syncContentTypes();
+
+    // Generate output
+    const outputBuffer = await this.outputZip.generateAsync({
+      type: 'nodebuffer',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 }
+    });
+
+    return {
+      buffer: outputBuffer,
+      report: {
+        mode: 'prepend-title',
+        originalSlideCount: this.sourceAnalysis.slides.length,
+        newSlideCount: this.sourceAnalysis.slides.length + 1,
+        titleSlideAdded: true,
+        backgroundApplied: true,
+        warnings: this.warnings
+      }
+    };
+  }
+
+  /**
+   * Copy template's design elements (theme, master, layouts) to output
+   */
+  async copyTemplateDesign() {
+    // Copy theme folder
+    const themeFiles = Object.keys(this.templateZip.files).filter(f =>
+      f.startsWith('ppt/theme/')
+    );
+    for (const file of themeFiles) {
+      const content = await this.templateZip.file(file).async('nodebuffer');
+      this.outputZip.file(file, content);
+    }
+
+    // Copy slide masters
+    const masterFiles = Object.keys(this.templateZip.files).filter(f =>
+      f.startsWith('ppt/slideMasters/')
+    );
+    for (const file of masterFiles) {
+      const content = await this.templateZip.file(file).async('nodebuffer');
+      this.outputZip.file(file, content);
+    }
+
+    // Copy slide layouts
+    const layoutFiles = Object.keys(this.templateZip.files).filter(f =>
+      f.startsWith('ppt/slideLayouts/')
+    );
+    for (const file of layoutFiles) {
+      const content = await this.templateZip.file(file).async('nodebuffer');
+      this.outputZip.file(file, content);
+    }
+
+    // Update Content_Types.xml for theme, masters, layouts
+    let contentTypes = await this.outputZip.file('[Content_Types].xml').async('string');
+
+    // Add theme content type if not present
+    if (!contentTypes.includes('ppt/theme/theme1.xml')) {
+      contentTypes = contentTypes.replace('</Types>',
+        '<Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>\n</Types>');
+    }
+
+    this.outputZip.file('[Content_Types].xml', contentTypes);
+  }
+
+  /**
+   * Extract the title slide from the template
+   */
+  async extractTemplateTitleSlide(customTitle) {
+    // Find the first slide in template (assuming it's the title slide)
+    // Or find a slide using the title layout
+    const templatePresXml = await this.templateZip.file('ppt/presentation.xml').async('string');
+
+    // Get slide list from template
+    const sldIdMatch = templatePresXml.match(/<p:sldId[^>]*r:id="([^"]+)"[^>]*\/>/);
+    if (!sldIdMatch) {
+      throw new Error('No slides found in template');
+    }
+
+    const firstSlideRId = sldIdMatch[1];
+
+    // Get the slide path from presentation.xml.rels
+    const presRels = await this.templateZip.file('ppt/_rels/presentation.xml.rels').async('string');
+    const slideRelMatch = presRels.match(new RegExp(`<Relationship[^>]*Id="${firstSlideRId}"[^>]*Target="([^"]+)"[^>]*/>`));
+
+    if (!slideRelMatch) {
+      throw new Error('Could not find title slide relationship');
+    }
+
+    const slidePath = slideRelMatch[1].startsWith('slides/')
+      ? `ppt/${slideRelMatch[1]}`
+      : `ppt/slides/${slideRelMatch[1].replace('../', '')}`;
+
+    // Read the title slide XML
+    let slideXml = await this.templateZip.file(slidePath).async('string');
+
+    // If custom title provided, update the title text
+    if (customTitle) {
+      slideXml = this.updateTitleText(slideXml, customTitle);
+    }
+
+    // Get the slide's rels file
+    const slideRelsPath = slidePath.replace('slides/', 'slides/_rels/') + '.rels';
+    const slideRelsFile = this.templateZip.file(slideRelsPath);
+    const slideRels = slideRelsFile ? await slideRelsFile.async('string') : null;
+
+    return {
+      xml: slideXml,
+      rels: slideRels,
+      originalPath: slidePath
+    };
+  }
+
+  /**
+   * Update the title text in a slide
+   */
+  updateTitleText(slideXml, newTitle) {
+    // Find title placeholder and update text
+    // Look for shape with <p:ph type="ctrTitle"/> or <p:ph type="title"/>
+    // This is a simplified approach - just replace the first title-like text
+
+    // Match the txBody inside a title placeholder shape
+    const titleShapeRegex = /(<p:sp[^>]*>[\s\S]*?<p:ph[^>]*type="(?:ctrTitle|title)"[^>]*\/>[\s\S]*?<p:txBody>)([\s\S]*?)(<\/p:txBody>[\s\S]*?<\/p:sp>)/;
+
+    const match = slideXml.match(titleShapeRegex);
+    if (match) {
+      // Create new txBody content with the custom title
+      const newTxBody = `<a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="de-DE" dirty="0"/><a:t>${this.escapeXml(newTitle)}</a:t></a:r></a:p>`;
+      slideXml = slideXml.replace(titleShapeRegex, `$1${newTxBody}$3`);
+    }
+
+    return slideXml;
+  }
+
+  /**
+   * Escape XML special characters
+   */
+  escapeXml(text) {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+  }
+
+  /**
+   * Insert the title slide at the beginning and renumber existing slides
+   */
+  async insertTitleSlideAtBeginning(titleSlideContent) {
+    // Step 1: Renumber all existing slides (slide1 -> slide2, etc.)
+    const existingSlides = Object.keys(this.outputZip.files).filter(f =>
+      f.match(/^ppt\/slides\/slide\d+\.xml$/)
+    ).sort((a, b) => {
+      const numA = parseInt(a.match(/slide(\d+)/)[1]);
+      const numB = parseInt(b.match(/slide(\d+)/)[1]);
+      return numB - numA; // Reverse order to avoid overwriting
+    });
+
+    const existingRels = Object.keys(this.outputZip.files).filter(f =>
+      f.match(/^ppt\/slides\/_rels\/slide\d+\.xml\.rels$/)
+    ).sort((a, b) => {
+      const numA = parseInt(a.match(/slide(\d+)/)[1]);
+      const numB = parseInt(b.match(/slide(\d+)/)[1]);
+      return numB - numA;
+    });
+
+    // Renumber slides from highest to lowest to avoid conflicts
+    for (const oldPath of existingSlides) {
+      const num = parseInt(oldPath.match(/slide(\d+)/)[1]);
+      const newNum = num + 1;
+      const newPath = `ppt/slides/slide${newNum}.xml`;
+
+      const content = await this.outputZip.file(oldPath).async('nodebuffer');
+      this.outputZip.file(newPath, content);
+      this.outputZip.remove(oldPath);
+    }
+
+    for (const oldPath of existingRels) {
+      const num = parseInt(oldPath.match(/slide(\d+)/)[1]);
+      const newNum = num + 1;
+      const newPath = `ppt/slides/_rels/slide${newNum}.xml.rels`;
+
+      let content = await this.outputZip.file(oldPath).async('string');
+
+      // Update notesSlide references if present
+      content = content.replace(
+        /Target="\.\.\/notesSlides\/notesSlide(\d+)\.xml"/g,
+        (match, noteNum) => `Target="../notesSlides/notesSlide${parseInt(noteNum) + 1}.xml"`
+      );
+
+      this.outputZip.file(newPath, content);
+      this.outputZip.remove(oldPath);
+    }
+
+    // Also renumber notes slides if they exist
+    const existingNotes = Object.keys(this.outputZip.files).filter(f =>
+      f.match(/^ppt\/notesSlides\/notesSlide\d+\.xml$/)
+    ).sort((a, b) => {
+      const numA = parseInt(a.match(/notesSlide(\d+)/)[1]);
+      const numB = parseInt(b.match(/notesSlide(\d+)/)[1]);
+      return numB - numA;
+    });
+
+    const existingNotesRels = Object.keys(this.outputZip.files).filter(f =>
+      f.match(/^ppt\/notesSlides\/_rels\/notesSlide\d+\.xml\.rels$/)
+    ).sort((a, b) => {
+      const numA = parseInt(a.match(/notesSlide(\d+)/)[1]);
+      const numB = parseInt(b.match(/notesSlide(\d+)/)[1]);
+      return numB - numA;
+    });
+
+    for (const oldPath of existingNotes) {
+      const num = parseInt(oldPath.match(/notesSlide(\d+)/)[1]);
+      const newNum = num + 1;
+      const newPath = `ppt/notesSlides/notesSlide${newNum}.xml`;
+
+      const content = await this.outputZip.file(oldPath).async('nodebuffer');
+      this.outputZip.file(newPath, content);
+      this.outputZip.remove(oldPath);
+    }
+
+    for (const oldPath of existingNotesRels) {
+      const num = parseInt(oldPath.match(/notesSlide(\d+)/)[1]);
+      const newNum = num + 1;
+      const newPath = `ppt/notesSlides/_rels/notesSlide${newNum}.xml.rels`;
+
+      let content = await this.outputZip.file(oldPath).async('string');
+
+      // Update slide references
+      content = content.replace(
+        /Target="\.\.\/slides\/slide(\d+)\.xml"/g,
+        (match, slideNum) => `Target="../slides/slide${parseInt(slideNum) + 1}.xml"`
+      );
+
+      this.outputZip.file(newPath, content);
+      this.outputZip.remove(oldPath);
+    }
+
+    // Step 2: Add the title slide as slide1
+    this.outputZip.file('ppt/slides/slide1.xml', titleSlideContent.xml);
+
+    // Create/copy rels for title slide
+    if (titleSlideContent.rels) {
+      this.outputZip.file('ppt/slides/_rels/slide1.xml.rels', titleSlideContent.rels);
+    } else {
+      // Create minimal rels pointing to the title layout
+      const titleLayout = this.templateAnalysis.layouts.find(l =>
+        l.type === 'title' || l.name.toLowerCase().includes('titel')
+      ) || this.templateAnalysis.layouts[0];
+
+      const relsContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/${titleLayout.file}"/>
+</Relationships>`;
+      this.outputZip.file('ppt/slides/_rels/slide1.xml.rels', relsContent);
+    }
+
+    // Copy any media referenced by the title slide from template
+    if (titleSlideContent.rels) {
+      const relsXml = await this.parseXmlFile({ file: (path) => ({ async: async () => titleSlideContent.rels }) }, 'dummy');
+      // Actually parse the rels properly
+      const relMatches = titleSlideContent.rels.matchAll(/<Relationship[^>]*Target="([^"]+)"[^>]*\/>/g);
+      for (const match of relMatches) {
+        const target = match[1];
+        if (target.includes('media/') || target.includes('image')) {
+          const mediaPath = target.startsWith('../')
+            ? `ppt/${target.replace('../', '')}`
+            : `ppt/slides/${target}`;
+
+          const templateFile = this.templateZip.file(mediaPath);
+          if (templateFile) {
+            const content = await templateFile.async('nodebuffer');
+            this.outputZip.file(mediaPath, content);
+          }
+        }
+      }
+    }
+
+    // Step 3: Update presentation.xml with new slide order
+    let presXml = await this.outputZip.file('ppt/presentation.xml').async('string');
+
+    // Get current slide ID list
+    const sldIdListMatch = presXml.match(/<p:sldIdLst>([\s\S]*?)<\/p:sldIdLst>/);
+    let maxSlideId = 256;
+
+    if (sldIdListMatch) {
+      // Find max slide ID
+      const idMatches = sldIdListMatch[1].matchAll(/id="(\d+)"/g);
+      for (const m of idMatches) {
+        const id = parseInt(m[1]);
+        if (id > maxSlideId) maxSlideId = id;
+      }
+    }
+
+    // Step 4: Update presentation.xml.rels - renumber slide relationships and add new one
+    let presRels = await this.outputZip.file('ppt/_rels/presentation.xml.rels').async('string');
+
+    // Find all slide relationships and renumber them
+    const slideRelRegex = /<Relationship[^>]*Id="(rId\d+)"[^>]*Type="[^"]*\/slide"[^>]*Target="slides\/slide(\d+)\.xml"[^>]*\/>/g;
+    const slideRels = [...presRels.matchAll(slideRelRegex)];
+
+    // Find max rId
+    let maxRId = 1;
+    const rIdMatches = presRels.matchAll(/Id="rId(\d+)"/g);
+    for (const m of rIdMatches) {
+      const id = parseInt(m[1]);
+      if (id > maxRId) maxRId = id;
+    }
+
+    // Remove old slide relationships
+    presRels = presRels.replace(/<Relationship[^>]*Type="[^"]*\/slide"[^>]*\/>/g, '');
+
+    // Add new slide relationships (title slide + renumbered existing)
+    const newTitleSlideRId = `rId${maxRId + 1}`;
+    let newRelsXml = `<Relationship Id="${newTitleSlideRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>`;
+
+    for (let i = 0; i < slideRels.length; i++) {
+      const newRId = `rId${maxRId + 2 + i}`;
+      const newSlideNum = i + 2; // Existing slides are now 2, 3, 4, ...
+      newRelsXml += `\n<Relationship Id="${newRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide${newSlideNum}.xml"/>`;
+    }
+
+    presRels = presRels.replace('</Relationships>', `${newRelsXml}\n</Relationships>`);
+    presRels = presRels.replace(/\n\s*\n/g, '\n'); // Clean up empty lines
+
+    this.outputZip.file('ppt/_rels/presentation.xml.rels', presRels);
+
+    // Update sldIdLst in presentation.xml
+    const newSlideId = maxSlideId + 1;
+    let newSldIdLst = `<p:sldId id="${newSlideId}" r:id="${newTitleSlideRId}"/>`;
+
+    for (let i = 0; i < slideRels.length; i++) {
+      const newRId = `rId${maxRId + 2 + i}`;
+      newSldIdLst += `<p:sldId id="${maxSlideId + 2 + i}" r:id="${newRId}"/>`;
+    }
+
+    if (sldIdListMatch) {
+      presXml = presXml.replace(/<p:sldIdLst>[\s\S]*?<\/p:sldIdLst>/, `<p:sldIdLst>${newSldIdLst}</p:sldIdLst>`);
+    } else {
+      // Insert after sldMasterIdLst
+      presXml = presXml.replace('</p:sldMasterIdLst>', `</p:sldMasterIdLst><p:sldIdLst>${newSldIdLst}</p:sldIdLst>`);
+    }
+
+    this.outputZip.file('ppt/presentation.xml', presXml);
+
+    // Update Content_Types.xml
+    let contentTypes = await this.outputZip.file('[Content_Types].xml').async('string');
+
+    // Remove old slide overrides
+    contentTypes = contentTypes.replace(/<Override[^>]*PartName="\/ppt\/slides\/slide\d+\.xml"[^>]*\/>\s*/g, '');
+
+    // Add new slide overrides
+    let slideOverrides = '';
+    for (let i = 1; i <= slideRels.length + 1; i++) {
+      slideOverrides += `<Override PartName="/ppt/slides/slide${i}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>\n`;
+    }
+
+    contentTypes = contentTypes.replace('</Types>', `${slideOverrides}</Types>`);
+    this.outputZip.file('[Content_Types].xml', contentTypes);
+  }
+
+  /**
+   * Apply template background to all existing slides by updating their layout references
+   */
+  async applyTemplateBackgroundToSlides() {
+    // Find a suitable content layout from template
+    const contentLayout = this.templateAnalysis.layouts.find(l =>
+      l.type === 'obj' || l.name.toLowerCase().includes('inhalt') || l.name.toLowerCase().includes('content')
+    ) || this.templateAnalysis.layouts.find(l =>
+      l.name.toLowerCase().includes('leer') || l.name.toLowerCase().includes('blank')
+    ) || this.templateAnalysis.layouts[1] || this.templateAnalysis.layouts[0];
+
+    // Update each existing slide's rels to point to template layout
+    // Slides 2+ are the original slides (slide1 is now the title)
+    const slideRelsFiles = Object.keys(this.outputZip.files).filter(f =>
+      f.match(/^ppt\/slides\/_rels\/slide[2-9]\d*\.xml\.rels$/) ||
+      f.match(/^ppt\/slides\/_rels\/slide[1-9]\d+\.xml\.rels$/)
+    );
+
+    for (const relsPath of slideRelsFiles) {
+      let relsContent = await this.outputZip.file(relsPath).async('string');
+
+      // Update layout reference to point to template layout
+      const newLayoutTarget = `../slideLayouts/${contentLayout.file}`;
+      relsContent = relsContent.replace(
+        /(<Relationship[^>]*Type="[^"]*slideLayout"[^>]*Target=")[^"]*(")/g,
+        `$1${newLayoutTarget}$2`
+      );
+
+      this.outputZip.file(relsPath, relsContent);
+    }
+  }
+
+  /**
    * Analyze the target template
    */
   async analyzeTemplate(zip) {

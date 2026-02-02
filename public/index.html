@@ -464,6 +464,81 @@
       opacity: 0.5;
       pointer-events: none;
     }
+
+    .mode-selector {
+      display: flex;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .mode-option {
+      flex: 1;
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+      padding: 1rem;
+      border: 2px solid var(--border);
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .mode-option:hover {
+      border-color: var(--primary);
+      background: rgba(37, 99, 235, 0.02);
+    }
+
+    .mode-option:has(input:checked) {
+      border-color: var(--primary);
+      background: rgba(37, 99, 235, 0.05);
+    }
+
+    .mode-option input[type="radio"] {
+      margin-top: 0.25rem;
+      width: 18px;
+      height: 18px;
+      cursor: pointer;
+    }
+
+    .mode-label {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .mode-label strong {
+      font-size: 0.9375rem;
+      color: var(--text);
+    }
+
+    .mode-label small {
+      font-size: 0.8125rem;
+      color: var(--text-secondary);
+    }
+
+    .title-input {
+      margin-bottom: 1.5rem;
+    }
+
+    .title-input input[type="text"] {
+      width: 100%;
+      padding: 0.75rem;
+      margin-top: 0.5rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 0.9375rem;
+    }
+
+    .title-input input[type="text"]:focus {
+      outline: none;
+      border-color: var(--primary);
+    }
+
+    @media (max-width: 768px) {
+      .mode-selector {
+        flex-direction: column;
+      }
+    }
   </style>
 </head>
 <body>
@@ -476,12 +551,34 @@
     <div class="card">
       <h2 class="card-title"><span class="step">1</span> Upload Files</h2>
 
+      <div class="mode-selector">
+        <label class="mode-option">
+          <input type="radio" name="migrationMode" value="full" checked>
+          <span class="mode-label">
+            <strong>Full Migration</strong>
+            <small>Migrate all slides to new template layouts</small>
+          </span>
+        </label>
+        <label class="mode-option">
+          <input type="radio" name="migrationMode" value="prepend">
+          <span class="mode-label">
+            <strong>Prepend Title Only</strong>
+            <small>Add title slide + apply template background</small>
+          </span>
+        </label>
+      </div>
+
       <div class="template-option hidden" id="templateOption">
         <label class="checkbox-label">
           <input type="checkbox" id="useDefaultTemplate" checked>
           <span class="checkbox-text">Use default template: <strong id="defaultTemplateName"></strong></span>
         </label>
         <p class="template-description" id="templateDescription"></p>
+      </div>
+
+      <div class="title-input hidden" id="titleInputSection">
+        <label for="customTitle" style="font-size: 0.875rem; font-weight: 500;">Title Slide Text (optional)</label>
+        <input type="text" id="customTitle" placeholder="Enter custom title text for the title slide">
       </div>
 
       <div class="upload-grid">
@@ -582,6 +679,7 @@
     let analysisData = null;
     let availableLayouts = [];
     let defaultTemplateInfo = null;
+    let migrationMode = 'full'; // 'full' or 'prepend'
 
     // DOM Elements
     const sourceInput = document.getElementById('sourceFile');
@@ -590,6 +688,9 @@
     const templateZone = document.getElementById('templateZone');
     const sourceFileName = document.getElementById('sourceFileName');
     const templateFileName = document.getElementById('templateFileName');
+    const titleInputSection = document.getElementById('titleInputSection');
+    const customTitleInput = document.getElementById('customTitle');
+    const modeRadios = document.querySelectorAll('input[name="migrationMode"]');
     const analyzeBtn = document.getElementById('analyzeBtn');
     const migrateBtn = document.getElementById('migrateBtn');
     const resetBtn = document.getElementById('resetBtn');
@@ -640,6 +741,20 @@
     }
 
     useDefaultTemplateCheckbox.addEventListener('change', updateTemplateZoneState);
+
+    // Mode change handler
+    modeRadios.forEach(radio => {
+      radio.addEventListener('change', (e) => {
+        migrationMode = e.target.value;
+        if (migrationMode === 'prepend') {
+          titleInputSection.classList.remove('hidden');
+          analyzeBtn.textContent = 'Process Presentation';
+        } else {
+          titleInputSection.classList.add('hidden');
+          analyzeBtn.textContent = 'Analyze Files';
+        }
+      });
+    });
 
     // Initialize
     checkDefaultTemplate();
@@ -701,15 +816,81 @@
     setupDropZone(sourceZone, sourceInput, sourceFileName, 'source');
     setupDropZone(templateZone, templateInput, templateFileName, 'template');
 
-    // Analyze files
+    // Analyze files or process directly (for prepend mode)
     analyzeBtn.addEventListener('click', async () => {
+      const useDefault = defaultTemplateInfo && useDefaultTemplateCheckbox.checked && !templateFile;
+
+      if (migrationMode === 'prepend') {
+        // Prepend mode: skip analysis, process directly
+        loading.classList.add('active');
+        loadingText.textContent = 'Adding title slide and applying background...';
+
+        const formData = new FormData();
+        formData.append('source', sourceFile);
+
+        if (useDefault) {
+          formData.append('useDefaultTemplate', 'true');
+        } else if (templateFile) {
+          formData.append('template', templateFile);
+        }
+
+        // Add custom title if provided
+        const customTitle = customTitleInput.value.trim();
+        if (customTitle) {
+          formData.append('titleText', customTitle);
+        }
+
+        try {
+          const response = await fetch('/api/prepend-title', {
+            method: 'POST',
+            body: formData
+          });
+
+          if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.message || errorData.error || 'Processing failed');
+          }
+
+          // Get the report from header
+          const reportHeader = response.headers.get('X-Migration-Report');
+          let report = null;
+          if (reportHeader) {
+            try {
+              report = JSON.parse(decodeURIComponent(reportHeader));
+            } catch (e) {
+              console.warn('Could not parse report');
+            }
+          }
+
+          // Download the file
+          const blob = await response.blob();
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = getPrependOutputFilename();
+          document.body.appendChild(a);
+          a.click();
+          window.URL.revokeObjectURL(url);
+          a.remove();
+
+          // Show success
+          displayResult(report);
+
+        } catch (error) {
+          showError(error.message);
+        } finally {
+          loading.classList.remove('active');
+        }
+        return;
+      }
+
+      // Full migration mode: analyze first
       loading.classList.add('active');
       loadingText.textContent = 'Analyzing files...';
 
       const formData = new FormData();
       formData.append('source', sourceFile);
 
-      const useDefault = defaultTemplateInfo && useDefaultTemplateCheckbox.checked && !templateFile;
       if (useDefault) {
         formData.append('useDefaultTemplate', 'true');
       } else if (templateFile) {
@@ -739,6 +920,11 @@
         loading.classList.remove('active');
       }
     });
+
+    function getPrependOutputFilename() {
+      const basename = sourceFile.name.replace('.pptx', '');
+      return `${basename}_with_title.pptx`;
+    }
 
     function displayAnalysisResults(data) {
       // Summary
@@ -918,6 +1104,7 @@
       templateFile = null;
       analysisData = null;
       availableLayouts = [];
+      migrationMode = 'full';
 
       sourceInput.value = '';
       templateInput.value = '';
@@ -925,6 +1112,12 @@
       templateFileName.classList.add('hidden');
       sourceZone.classList.remove('has-file');
       templateZone.classList.remove('has-file');
+
+      // Reset mode selector
+      document.querySelector('input[name="migrationMode"][value="full"]').checked = true;
+      titleInputSection.classList.add('hidden');
+      customTitleInput.value = '';
+      analyzeBtn.textContent = 'Analyze Files';
 
       // Reset to use default template if available
       if (defaultTemplateInfo) {
