@@ -1,6 +1,5 @@
 import JSZip from 'jszip';
-import { parseStringPromise, Builder } from 'xml2js';
-import { v4 as uuidv4 } from 'uuid';
+import { XMLParser, XMLBuilder } from 'fast-xml-parser';
 
 /**
  * PPTX Template Migration Library
@@ -8,21 +7,25 @@ import { v4 as uuidv4 } from 'uuid';
  */
 
 const XML_PARSER_OPTIONS = {
-  explicitArray: false,
-  preserveChildrenOrder: true,
-  explicitChildren: true,
-  attrkey: '$',
-  charkey: '_',
-  trim: false,
-  normalize: false,
-  normalizeTags: false,
-  explicitRoot: true
+  ignoreAttributes: false,
+  attributeNamePrefix: '@_',
+  textNodeName: '#text',
+  preserveOrder: true,
+  parseAttributeValue: false,
+  trimValues: false,
+  processEntities: true,
+  parseTagValue: false
 };
 
 const XML_BUILDER_OPTIONS = {
-  renderOpts: { pretty: true, indent: '  ', newline: '\n' },
-  xmldec: { version: '1.0', encoding: 'UTF-8', standalone: true },
-  headless: false
+  ignoreAttributes: false,
+  attributeNamePrefix: '@_',
+  textNodeName: '#text',
+  preserveOrder: true,
+  format: true,
+  indentBy: '  ',
+  suppressEmptyNode: false,
+  processEntities: true
 };
 
 /**
@@ -40,6 +43,8 @@ export class PPTXMigrator {
     this.mediaMapping = new Map();
     this.nextSlideId = 256;
     this.nextRelId = 1;
+    this.parser = new XMLParser(XML_PARSER_OPTIONS);
+    this.builder = new XMLBuilder(XML_BUILDER_OPTIONS);
   }
 
   /**
@@ -98,18 +103,16 @@ export class PPTXMigrator {
     // Parse presentation.xml for slide size
     const presentationXml = await this.parseXmlFile(zip, 'ppt/presentation.xml');
     if (presentationXml) {
-      const pres = presentationXml['p:presentation'] || presentationXml;
-      if (pres['p:sldSz']) {
+      const sldSz = this.findElement(presentationXml, 'p:sldSz');
+      if (sldSz) {
+        const attrs = this.getAttributes(sldSz);
         analysis.slideSize = {
-          cx: parseInt(pres['p:sldSz'].$?.cx || 9144000),
-          cy: parseInt(pres['p:sldSz'].$?.cy || 6858000),
-          type: pres['p:sldSz'].$?.type || 'custom'
+          cx: parseInt(attrs.cx || 9144000),
+          cy: parseInt(attrs.cy || 6858000),
+          type: attrs.type || 'custom'
         };
       }
     }
-
-    // Parse presentation.xml.rels
-    const presRels = await this.parseXmlFile(zip, 'ppt/_rels/presentation.xml.rels');
 
     // Get all layout files
     const layoutFiles = Object.keys(zip.files).filter(f =>
@@ -120,14 +123,16 @@ export class PPTXMigrator {
       const layoutXml = await this.parseXmlFile(zip, layoutFile);
       if (!layoutXml) continue;
 
-      const layout = layoutXml['p:sldLayout'] || layoutXml;
-      const cSld = layout['p:cSld'] || {};
+      const sldLayout = this.findElement(layoutXml, 'p:sldLayout');
+      const cSld = this.findElement(sldLayout, 'p:cSld');
+      const layoutAttrs = this.getAttributes(sldLayout);
+      const cSldAttrs = this.getAttributes(cSld);
 
       const layoutInfo = {
         file: layoutFile.split('/').pop(),
         path: layoutFile,
-        name: cSld.$?.name || 'Unnamed Layout',
-        type: layout.$?.type || 'obj',
+        name: cSldAttrs.name || 'Unnamed Layout',
+        type: layoutAttrs.type || 'obj',
         placeholders: this.extractPlaceholders(cSld)
       };
 
@@ -135,7 +140,7 @@ export class PPTXMigrator {
       const layoutRelsPath = layoutFile.replace('slideLayouts/', 'slideLayouts/_rels/') + '.rels';
       const layoutRels = await this.parseXmlFile(zip, layoutRelsPath);
       if (layoutRels) {
-        const rels = this.normalizeRels(layoutRels);
+        const rels = this.parseRels(layoutRels);
         const masterRel = rels.find(r => r.Type?.includes('slideMaster'));
         if (masterRel) {
           layoutInfo.masterRef = masterRel.Target;
@@ -172,37 +177,34 @@ export class PPTXMigrator {
       throw new Error('Invalid PPTX: Missing presentation.xml');
     }
 
-    const pres = presentationXml['p:presentation'] || presentationXml;
-
     // Get slide size
-    if (pres['p:sldSz']) {
+    const sldSz = this.findElement(presentationXml, 'p:sldSz');
+    if (sldSz) {
+      const attrs = this.getAttributes(sldSz);
       analysis.slideSize = {
-        cx: parseInt(pres['p:sldSz'].$?.cx || 9144000),
-        cy: parseInt(pres['p:sldSz'].$?.cy || 6858000),
-        type: pres['p:sldSz'].$?.type || 'custom'
+        cx: parseInt(attrs.cx || 9144000),
+        cy: parseInt(attrs.cy || 6858000),
+        type: attrs.type || 'custom'
       };
     }
 
     // Get slide list
-    const sldIdLst = pres['p:sldIdLst'];
-    let slideIds = [];
-    if (sldIdLst) {
-      const sldIds = sldIdLst['p:sldId'];
-      slideIds = Array.isArray(sldIds) ? sldIds : (sldIds ? [sldIds] : []);
-    }
+    const sldIdLst = this.findElement(presentationXml, 'p:sldIdLst');
+    const slideIds = sldIdLst ? this.findAllElements(sldIdLst, 'p:sldId') : [];
 
     // Parse presentation.xml.rels to map r:id to file paths
     const presRels = await this.parseXmlFile(zip, 'ppt/_rels/presentation.xml.rels');
     const relMap = new Map();
     if (presRels) {
-      const rels = this.normalizeRels(presRels);
+      const rels = this.parseRels(presRels);
       rels.forEach(r => relMap.set(r.Id, r.Target));
     }
 
     // Analyze each slide
     for (let i = 0; i < slideIds.length; i++) {
       const slideId = slideIds[i];
-      const rId = slideId.$?.['r:id'];
+      const attrs = this.getAttributes(slideId);
+      const rId = attrs['r:id'];
       const slidePath = relMap.get(rId);
 
       if (!slidePath) continue;
@@ -227,13 +229,13 @@ export class PPTXMigrator {
    * Analyze a single slide
    */
   async analyzeSlide(zip, slidePath, slideXml, slideNumber) {
-    const slide = slideXml['p:sld'] || slideXml;
-    const cSld = slide['p:cSld'] || {};
+    const slide = this.findElement(slideXml, 'p:sld');
+    const cSld = this.findElement(slide, 'p:cSld');
 
     const slideInfo = {
       number: slideNumber,
       path: slidePath,
-      xml: slideXml,
+      rawXml: null, // Store raw XML string for copying
       layout: null,
       layoutName: null,
       layoutType: null,
@@ -241,16 +243,22 @@ export class PPTXMigrator {
       placeholderContent: [],
       freeformContent: [],
       notes: null,
-      transition: slide['p:transition'] || null,
-      timing: slide['p:timing'] || null
+      notesPath: null
     };
+
+    // Store raw XML for direct copying
+    const rawXmlFile = zip.file(slidePath);
+    if (rawXmlFile) {
+      slideInfo.rawXml = await rawXmlFile.async('string');
+    }
 
     // Get layout reference from slide rels
     const slideRelsPath = slidePath.replace('slides/', 'slides/_rels/') + '.rels';
     const slideRels = await this.parseXmlFile(zip, slideRelsPath);
+    slideInfo.rawRels = slideRels;
 
     if (slideRels) {
-      const rels = this.normalizeRels(slideRels);
+      const rels = this.parseRels(slideRels);
       const layoutRel = rels.find(r => r.Type?.includes('slideLayout'));
       if (layoutRel) {
         slideInfo.layout = layoutRel.Target;
@@ -261,10 +269,12 @@ export class PPTXMigrator {
           : layoutRel.Target;
         const layoutXml = await this.parseXmlFile(zip, layoutPath);
         if (layoutXml) {
-          const layout = layoutXml['p:sldLayout'] || layoutXml;
-          const layoutCSld = layout['p:cSld'] || {};
-          slideInfo.layoutName = layoutCSld.$?.name || 'Unknown';
-          slideInfo.layoutType = layout.$?.type || 'obj';
+          const layout = this.findElement(layoutXml, 'p:sldLayout');
+          const layoutCSld = this.findElement(layout, 'p:cSld');
+          const layoutAttrs = this.getAttributes(layout);
+          const cSldAttrs = this.getAttributes(layoutCSld);
+          slideInfo.layoutName = cSldAttrs.name || 'Unknown';
+          slideInfo.layoutType = layoutAttrs.type || 'obj';
         }
       }
 
@@ -274,13 +284,16 @@ export class PPTXMigrator {
         const notesPath = notesRel.Target.startsWith('..')
           ? `ppt/notesSlides/${notesRel.Target.split('/').pop()}`
           : notesRel.Target;
-        slideInfo.notes = await this.parseXmlFile(zip, notesPath);
-        slideInfo.notesPath = notesPath;
+        const notesFile = zip.file(notesPath);
+        if (notesFile) {
+          slideInfo.notes = await notesFile.async('string');
+          slideInfo.notesPath = notesPath;
+        }
       }
     }
 
     // Extract content from spTree
-    const spTree = cSld['p:spTree'];
+    const spTree = this.findElement(cSld, 'p:spTree');
     if (spTree) {
       this.extractSlideContent(spTree, slideInfo);
     }
@@ -296,21 +309,21 @@ export class PPTXMigrator {
    */
   extractSlideContent(spTree, slideInfo) {
     // Process shapes
-    const shapes = this.getShapes(spTree, 'p:sp');
+    const shapes = this.findAllElements(spTree, 'p:sp');
     for (const shape of shapes) {
-      const nvSpPr = shape['p:nvSpPr'] || {};
-      const nvPr = nvSpPr['p:nvPr'] || {};
+      const nvSpPr = this.findElement(shape, 'p:nvSpPr');
+      const nvPr = this.findElement(nvSpPr, 'p:nvPr');
+      const ph = this.findElement(nvPr, 'p:ph');
 
-      if (nvPr['p:ph']) {
-        // This is placeholder content
+      if (ph) {
+        const phAttrs = this.getAttributes(ph);
         slideInfo.placeholderContent.push({
           type: 'shape',
           element: shape,
-          phType: nvPr['p:ph'].$?.type || 'body',
-          phIdx: nvPr['p:ph'].$?.idx
+          phType: phAttrs.type || 'body',
+          phIdx: phAttrs.idx
         });
       } else {
-        // Freeform content
         slideInfo.freeformContent.push({
           type: 'shape',
           element: shape
@@ -319,17 +332,19 @@ export class PPTXMigrator {
     }
 
     // Process pictures
-    const pictures = this.getShapes(spTree, 'p:pic');
+    const pictures = this.findAllElements(spTree, 'p:pic');
     for (const pic of pictures) {
-      const nvPicPr = pic['p:nvPicPr'] || {};
-      const nvPr = nvPicPr['p:nvPr'] || {};
+      const nvPicPr = this.findElement(pic, 'p:nvPicPr');
+      const nvPr = this.findElement(nvPicPr, 'p:nvPr');
+      const ph = this.findElement(nvPr, 'p:ph');
 
-      if (nvPr['p:ph']) {
+      if (ph) {
+        const phAttrs = this.getAttributes(ph);
         slideInfo.placeholderContent.push({
           type: 'picture',
           element: pic,
-          phType: nvPr['p:ph'].$?.type || 'pic',
-          phIdx: nvPr['p:ph'].$?.idx
+          phType: phAttrs.type || 'pic',
+          phIdx: phAttrs.idx
         });
       } else {
         slideInfo.freeformContent.push({
@@ -340,7 +355,7 @@ export class PPTXMigrator {
     }
 
     // Process graphic frames (charts, tables, diagrams)
-    const graphicFrames = this.getShapes(spTree, 'p:graphicFrame');
+    const graphicFrames = this.findAllElements(spTree, 'p:graphicFrame');
     for (const gf of graphicFrames) {
       slideInfo.freeformContent.push({
         type: 'graphicFrame',
@@ -349,7 +364,7 @@ export class PPTXMigrator {
     }
 
     // Process groups
-    const groups = this.getShapes(spTree, 'p:grpSp');
+    const groups = this.findAllElements(spTree, 'p:grpSp');
     for (const grp of groups) {
       slideInfo.freeformContent.push({
         type: 'group',
@@ -359,45 +374,40 @@ export class PPTXMigrator {
   }
 
   /**
-   * Get shapes of a specific type from spTree
-   */
-  getShapes(spTree, shapeName) {
-    if (!spTree) return [];
-    const shapes = spTree[shapeName];
-    if (!shapes) return [];
-    return Array.isArray(shapes) ? shapes : [shapes];
-  }
-
-  /**
    * Extract placeholders from a layout or master
    */
   extractPlaceholders(cSld) {
     const placeholders = [];
-    const spTree = cSld['p:spTree'];
+    if (!cSld) return placeholders;
+
+    const spTree = this.findElement(cSld, 'p:spTree');
     if (!spTree) return placeholders;
 
-    const shapes = this.getShapes(spTree, 'p:sp');
+    const shapes = this.findAllElements(spTree, 'p:sp');
     for (const shape of shapes) {
-      const nvSpPr = shape['p:nvSpPr'] || {};
-      const nvPr = nvSpPr['p:nvPr'] || {};
+      const nvSpPr = this.findElement(shape, 'p:nvSpPr');
+      const nvPr = this.findElement(nvSpPr, 'p:nvPr');
+      const ph = this.findElement(nvPr, 'p:ph');
 
-      if (nvPr['p:ph']) {
-        const ph = nvPr['p:ph'].$;
-        const spPr = shape['p:spPr'] || {};
-        const xfrm = spPr['a:xfrm'] || {};
-        const off = xfrm['a:off'] || {};
-        const ext = xfrm['a:ext'] || {};
+      if (ph) {
+        const phAttrs = this.getAttributes(ph);
+        const spPr = this.findElement(shape, 'p:spPr');
+        const xfrm = this.findElement(spPr, 'a:xfrm');
+        const off = this.findElement(xfrm, 'a:off');
+        const ext = this.findElement(xfrm, 'a:ext');
+        const offAttrs = this.getAttributes(off);
+        const extAttrs = this.getAttributes(ext);
 
         placeholders.push({
-          type: ph?.type || 'body',
-          idx: ph?.idx,
+          type: phAttrs.type || 'body',
+          idx: phAttrs.idx,
           position: {
-            x: parseInt(off.$?.x || 0),
-            y: parseInt(off.$?.y || 0)
+            x: parseInt(offAttrs.x || 0),
+            y: parseInt(offAttrs.y || 0)
           },
           size: {
-            cx: parseInt(ext.$?.cx || 0),
-            cy: parseInt(ext.$?.cy || 0)
+            cx: parseInt(extAttrs.cx || 0),
+            cy: parseInt(extAttrs.cy || 0)
           }
         });
       }
@@ -413,7 +423,7 @@ export class PPTXMigrator {
     for (const content of slideInfo.placeholderContent) {
       const phType = content.phType;
       if (phType === 'title' || phType === 'ctrTitle') {
-        const txBody = content.element['p:txBody'];
+        const txBody = this.findElement(content.element, 'p:txBody');
         if (txBody) {
           return this.extractTextFromTxBody(txBody);
         }
@@ -428,18 +438,16 @@ export class PPTXMigrator {
   extractTextFromTxBody(txBody) {
     if (!txBody) return '';
 
-    const paragraphs = txBody['a:p'];
-    const pList = Array.isArray(paragraphs) ? paragraphs : (paragraphs ? [paragraphs] : []);
-
+    const paragraphs = this.findAllElements(txBody, 'a:p');
     const textParts = [];
-    for (const p of pList) {
-      const runs = p['a:r'];
-      const rList = Array.isArray(runs) ? runs : (runs ? [runs] : []);
 
-      for (const r of rList) {
-        const t = r['a:t'];
+    for (const p of paragraphs) {
+      const runs = this.findAllElements(p, 'a:r');
+      for (const r of runs) {
+        const t = this.findElement(r, 'a:t');
         if (t) {
-          textParts.push(typeof t === 'string' ? t : (t._ || ''));
+          const text = this.getTextContent(t);
+          if (text) textParts.push(text);
         }
       }
     }
@@ -548,7 +556,6 @@ export class PPTXMigrator {
    */
   findLayoutByType(sourceType) {
     if (!sourceType) return null;
-
     return this.templateAnalysis.layouts.find(l => l.type === sourceType);
   }
 
@@ -558,7 +565,6 @@ export class PPTXMigrator {
   findLayoutByStructure(slide) {
     const sourcePlaceholders = slide.placeholderContent.length;
 
-    // Find layout with closest placeholder count
     let bestMatch = null;
     let bestDiff = Infinity;
 
@@ -578,7 +584,6 @@ export class PPTXMigrator {
    */
   findUserMapping(slide, instructions) {
     if (typeof instructions === 'string') {
-      // Parse simple mapping format: "Source Layout -> Target Layout"
       const lines = instructions.split('\n');
       for (const line of lines) {
         const match = line.match(/["']?([^"']+)["']?\s*[-=]>\s*["']?([^"']+)["']?/i);
@@ -603,15 +608,27 @@ export class PPTXMigrator {
    */
   async prepareOutputPackage() {
     // Parse presentation.xml
-    const presentationXml = await this.parseXmlFile(this.outputZip, 'ppt/presentation.xml');
-    const pres = presentationXml['p:presentation'] || presentationXml;
+    const presXmlStr = await this.outputZip.file('ppt/presentation.xml').async('string');
+    let presXml = this.parser.parse(presXmlStr);
 
-    // Clear slide ID list
-    if (pres['p:sldIdLst']) {
-      pres['p:sldIdLst'] = { 'p:sldId': [] };
+    // Find and clear sldIdLst
+    const presentation = this.findElement(presXml, 'p:presentation');
+    const sldIdLst = this.findElement(presentation, 'p:sldIdLst');
+
+    if (sldIdLst) {
+      // Remove all p:sldId children
+      if (Array.isArray(sldIdLst)) {
+        for (const item of sldIdLst) {
+          if (item['p:sldId']) {
+            delete item['p:sldId'];
+          }
+        }
+      } else if (sldIdLst['p:sldId']) {
+        delete sldIdLst['p:sldId'];
+      }
     }
 
-    // Update slide size if different
+    // Check slide size
     if (this.sourceAnalysis.slideSize && this.templateAnalysis.slideSize) {
       const src = this.sourceAnalysis.slideSize;
       const tgt = this.templateAnalysis.slideSize;
@@ -624,7 +641,8 @@ export class PPTXMigrator {
     }
 
     // Write updated presentation.xml
-    await this.writeXmlFile(this.outputZip, 'ppt/presentation.xml', presentationXml);
+    const updatedPresXml = this.buildXml(presXml);
+    this.outputZip.file('ppt/presentation.xml', updatedPresXml);
 
     // Remove existing slides
     const slideFiles = Object.keys(this.outputZip.files).filter(f =>
@@ -638,48 +656,79 @@ export class PPTXMigrator {
       this.outputZip.remove(file);
     }
 
-    // Update presentation.xml.rels to remove slide references
+    // Update presentation.xml.rels
     const presRelsPath = 'ppt/_rels/presentation.xml.rels';
-    const presRels = await this.parseXmlFile(this.outputZip, presRelsPath);
-    if (presRels) {
-      const rels = this.normalizeRels(presRels);
-      const filteredRels = rels.filter(r => !r.Type?.includes('/slide') || r.Type?.includes('slideLayout') || r.Type?.includes('slideMaster'));
-      await this.writeRelsFile(this.outputZip, presRelsPath, filteredRels);
+    const presRelsStr = await this.outputZip.file(presRelsPath).async('string');
+    let presRels = this.parser.parse(presRelsStr);
 
-      // Track next rel ID
-      const maxId = rels.reduce((max, r) => {
-        const id = parseInt(r.Id.replace('rId', ''));
-        return id > max ? id : max;
-      }, 0);
+    const relationships = this.findElement(presRels, 'Relationships');
+    if (relationships) {
+      // Filter out slide relationships but keep layout and master refs
+      const rels = this.findAllElements(relationships, 'Relationship');
+      let maxId = 0;
+
+      for (const rel of rels) {
+        const attrs = this.getAttributes(rel);
+        const id = parseInt((attrs.Id || '').replace('rId', ''));
+        if (id > maxId) maxId = id;
+
+        // Remove slide relationships
+        if (attrs.Type?.includes('/slide') && !attrs.Type?.includes('slideLayout') && !attrs.Type?.includes('slideMaster')) {
+          // Mark for removal by clearing
+          if (rel[':@']) {
+            rel[':@']['@_Id'] = '__REMOVE__';
+          }
+        }
+      }
+
       this.nextRelId = maxId + 1;
     }
+
+    // Rebuild rels without removed entries
+    const updatedPresRels = this.buildXml(presRels);
+    const cleanedRels = updatedPresRels.replace(/<Relationship[^>]*Id="__REMOVE__"[^>]*\/>/g, '');
+    this.outputZip.file(presRelsPath, cleanedRels);
   }
 
   /**
    * Migrate all slides
    */
   async migrateSlides() {
-    const slideIds = [];
+    const slideIdEntries = [];
 
     for (let i = 0; i < this.migrationPlan.length; i++) {
       const planItem = this.migrationPlan[i];
       const sourceSlide = this.sourceAnalysis.slides.find(s => s.number === planItem.slideNumber);
 
       const slideId = await this.migrateSlide(sourceSlide, planItem.targetLayout, i + 1);
-      slideIds.push(slideId);
+      slideIdEntries.push(slideId);
     }
 
     // Update presentation.xml with new slide list
-    const presentationXml = await this.parseXmlFile(this.outputZip, 'ppt/presentation.xml');
-    const pres = presentationXml['p:presentation'] || presentationXml;
+    const presXmlStr = await this.outputZip.file('ppt/presentation.xml').async('string');
 
-    pres['p:sldIdLst'] = {
-      'p:sldId': slideIds.map(sid => ({
-        $: { id: sid.id.toString(), 'r:id': sid.rId }
-      }))
-    };
+    // Use string manipulation to add slide IDs (more reliable for OOXML)
+    let updatedPresXml = presXmlStr;
 
-    await this.writeXmlFile(this.outputZip, 'ppt/presentation.xml', presentationXml);
+    // Build slide ID list XML
+    const sldIdXml = slideIdEntries.map(s =>
+      `<p:sldId id="${s.id}" r:id="${s.rId}"/>`
+    ).join('');
+
+    // Replace empty sldIdLst or insert slide IDs
+    if (updatedPresXml.includes('<p:sldIdLst/>')) {
+      updatedPresXml = updatedPresXml.replace('<p:sldIdLst/>', `<p:sldIdLst>${sldIdXml}</p:sldIdLst>`);
+    } else if (updatedPresXml.includes('<p:sldIdLst>')) {
+      updatedPresXml = updatedPresXml.replace(/<p:sldIdLst>[\s\S]*?<\/p:sldIdLst>/, `<p:sldIdLst>${sldIdXml}</p:sldIdLst>`);
+    } else {
+      // Insert after sldMasterIdLst
+      updatedPresXml = updatedPresXml.replace(
+        /<\/p:sldMasterIdLst>/,
+        `</p:sldMasterIdLst><p:sldIdLst>${sldIdXml}</p:sldIdLst>`
+      );
+    }
+
+    this.outputZip.file('ppt/presentation.xml', updatedPresXml);
   }
 
   /**
@@ -690,75 +739,119 @@ export class PPTXMigrator {
     const slidePath = `ppt/slides/${slideFileName}`;
     const slideRelsPath = `ppt/slides/_rels/${slideFileName}.rels`;
 
-    // Create new slide structure based on source
-    const newSlide = this.createNewSlide(sourceSlide, targetLayout);
+    // Copy the raw slide XML from source
+    let slideXml = sourceSlide.rawXml;
+
+    // Update any layout-specific references if needed
+    // The slide content itself is preserved as-is
+
+    // Write slide XML
+    this.outputZip.file(slidePath, slideXml);
 
     // Create slide relationships
-    const slideRels = [];
-
-    // Add layout relationship
     const layoutRelPath = `../slideLayouts/${targetLayout.file}`;
-    slideRels.push({
-      Id: 'rId1',
-      Type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout',
-      Target: layoutRelPath
-    });
+
+    // Parse source rels to get media and other references
+    let slideRelsContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="${layoutRelPath}"/>`;
 
     let nextRelId = 2;
 
-    // Copy media files and update references
-    await this.copyMediaForSlide(sourceSlide, newSlide, slideRels, nextRelId);
+    // Copy relationships from source (excluding layout)
+    if (sourceSlide.rawRels) {
+      const sourceRels = this.parseRels(sourceSlide.rawRels);
 
-    // Handle notes
-    if (sourceSlide.notes) {
-      const notesSlideNumber = slideNumber;
-      const notesPath = `ppt/notesSlides/notesSlide${notesSlideNumber}.xml`;
-      const notesRelsPath = `ppt/notesSlides/_rels/notesSlide${notesSlideNumber}.xml.rels`;
+      for (const rel of sourceRels) {
+        // Skip layout relationship (we use our own)
+        if (rel.Type?.includes('slideLayout')) continue;
 
-      // Copy notes content
-      await this.writeXmlFile(this.outputZip, notesPath, sourceSlide.notes);
+        // Copy the relationship
+        const newRelId = `rId${nextRelId++}`;
 
-      // Create notes rels
-      const notesRels = [{
-        Id: 'rId1',
-        Type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide',
-        Target: `../slides/${slideFileName}`
-      }];
-      await this.writeRelsFile(this.outputZip, notesRelsPath, notesRels);
+        // Copy referenced file if it exists
+        let targetPath = rel.Target;
+        if (targetPath.startsWith('../')) {
+          const sourcePath = `ppt/${targetPath.replace('../', '')}`;
+          const sourceFile = this.sourceZip.file(sourcePath);
+          if (sourceFile) {
+            const content = await sourceFile.async('nodebuffer');
+            this.outputZip.file(sourcePath, content);
 
-      // Add notes rel to slide
-      slideRels.push({
-        Id: `rId${slideRels.length + 1}`,
-        Type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide',
-        Target: `../notesSlides/notesSlide${notesSlideNumber}.xml`
-      });
+            // Register in Content_Types if needed
+            await this.ensureContentType(sourcePath);
+          }
+        }
 
-      // Register notes in Content_Types
-      await this.registerContentType(notesPath, 'application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml');
+        const targetModeAttr = rel.TargetMode ? ` TargetMode="${rel.TargetMode}"` : '';
+        slideRelsContent += `\n<Relationship Id="${newRelId}" Type="${rel.Type}" Target="${rel.Target}"${targetModeAttr}/>`;
+
+        // Update the slide XML with new rel ID if needed
+        if (rel.Id !== newRelId) {
+          slideXml = slideXml.replace(new RegExp(`r:id="${rel.Id}"`, 'g'), `r:id="${newRelId}"`);
+          slideXml = slideXml.replace(new RegExp(`r:embed="${rel.Id}"`, 'g'), `r:embed="${newRelId}"`);
+          slideXml = slideXml.replace(new RegExp(`r:link="${rel.Id}"`, 'g'), `r:link="${newRelId}"`);
+        }
+      }
     }
 
-    // Write slide XML
-    await this.writeXmlFile(this.outputZip, slidePath, { 'p:sld': newSlide });
+    slideRelsContent += '\n</Relationships>';
+
+    // Update the slide file with corrected rel IDs
+    this.outputZip.file(slidePath, slideXml);
 
     // Write slide rels
-    await this.writeRelsFile(this.outputZip, slideRelsPath, slideRels);
+    this.outputZip.file(slideRelsPath, slideRelsContent);
+
+    // Handle notes if present
+    if (sourceSlide.notes && sourceSlide.notesPath) {
+      const notesFileName = `notesSlide${slideNumber}.xml`;
+      const notesPath = `ppt/notesSlides/${notesFileName}`;
+      const notesRelsPath = `ppt/notesSlides/_rels/${notesFileName}.rels`;
+
+      // Update notes to reference new slide
+      let notesXml = sourceSlide.notes;
+      // Notes reference the slide - update if path changed
+      notesXml = notesXml.replace(/Target="[^"]*slide\d+\.xml"/g, `Target="../slides/${slideFileName}"`);
+
+      this.outputZip.file(notesPath, notesXml);
+
+      // Notes rels
+      const notesRelsContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="../slides/${slideFileName}"/>
+</Relationships>`;
+
+      this.outputZip.file(notesRelsPath, notesRelsContent);
+
+      // Add notes relationship to slide rels
+      slideRelsContent = slideRelsContent.replace(
+        '</Relationships>',
+        `<Relationship Id="rId${nextRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/${notesFileName}"/>
+</Relationships>`
+      );
+      this.outputZip.file(slideRelsPath, slideRelsContent);
+
+      await this.ensureContentType(notesPath, 'application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml');
+    }
 
     // Register slide in Content_Types
-    await this.registerContentType(slidePath, 'application/vnd.openxmlformats-officedocument.presentationml.slide+xml');
+    await this.ensureContentType(slidePath, 'application/vnd.openxmlformats-officedocument.presentationml.slide+xml');
 
     // Add to presentation.xml.rels
     const presRelsPath = 'ppt/_rels/presentation.xml.rels';
-    const presRels = await this.parseXmlFile(this.outputZip, presRelsPath);
-    const rels = this.normalizeRels(presRels);
+    let presRelsStr = await this.outputZip.file(presRelsPath).async('string');
 
     const slideRelId = `rId${this.nextRelId++}`;
-    rels.push({
-      Id: slideRelId,
-      Type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide',
-      Target: `slides/${slideFileName}`
-    });
 
-    await this.writeRelsFile(this.outputZip, presRelsPath, rels);
+    // Add new relationship
+    presRelsStr = presRelsStr.replace(
+      '</Relationships>',
+      `<Relationship Id="${slideRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/${slideFileName}"/>
+</Relationships>`
+    );
+
+    this.outputZip.file(presRelsPath, presRelsStr);
 
     return {
       id: this.nextSlideId++,
@@ -767,207 +860,77 @@ export class PPTXMigrator {
   }
 
   /**
-   * Create a new slide structure
-   */
-  createNewSlide(sourceSlide, targetLayout) {
-    const sourceXml = sourceSlide.xml['p:sld'] || sourceSlide.xml;
-
-    // Start with source slide structure
-    const newSlide = {
-      $: {
-        'xmlns:a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
-        'xmlns:r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
-        'xmlns:p': 'http://schemas.openxmlformats.org/presentationml/2006/main'
-      }
-    };
-
-    // Copy cSld (common slide data)
-    if (sourceXml['p:cSld']) {
-      newSlide['p:cSld'] = JSON.parse(JSON.stringify(sourceXml['p:cSld']));
-    }
-
-    // Copy clrMapOvr if present
-    if (sourceXml['p:clrMapOvr']) {
-      newSlide['p:clrMapOvr'] = JSON.parse(JSON.stringify(sourceXml['p:clrMapOvr']));
-    }
-
-    // Copy transition if present
-    if (sourceSlide.transition) {
-      newSlide['p:transition'] = JSON.parse(JSON.stringify(sourceSlide.transition));
-    }
-
-    // Copy timing if present
-    if (sourceSlide.timing) {
-      newSlide['p:timing'] = JSON.parse(JSON.stringify(sourceSlide.timing));
-    }
-
-    return newSlide;
-  }
-
-  /**
-   * Copy media files for a slide and update references
-   */
-  async copyMediaForSlide(sourceSlide, newSlide, slideRels, startRelId) {
-    const slideRelsPath = sourceSlide.path.replace('slides/', 'slides/_rels/') + '.rels';
-    const sourceRels = await this.parseXmlFile(this.sourceZip, slideRelsPath);
-
-    if (!sourceRels) return startRelId;
-
-    const rels = this.normalizeRels(sourceRels);
-    let nextRelId = startRelId;
-    const relIdMapping = new Map();
-
-    for (const rel of rels) {
-      // Skip layout relationship (we handle it separately)
-      if (rel.Type?.includes('slideLayout')) continue;
-
-      // Skip notes (handled separately)
-      if (rel.Type?.includes('notesSlide')) continue;
-
-      const targetPath = rel.Target;
-      let sourcePath = '';
-
-      if (targetPath.startsWith('../')) {
-        sourcePath = `ppt/${targetPath.replace('../', '')}`;
-      } else if (targetPath.startsWith('/')) {
-        sourcePath = targetPath.substring(1);
-      } else {
-        sourcePath = `ppt/slides/${targetPath}`;
-      }
-
-      // Check if file exists in source
-      const sourceFile = this.sourceZip.file(sourcePath);
-      if (sourceFile) {
-        // Copy to output
-        const content = await sourceFile.async('nodebuffer');
-        this.outputZip.file(sourcePath, content);
-
-        // Register content type
-        const ext = sourcePath.split('.').pop()?.toLowerCase();
-        const mimeType = this.getMimeType(ext);
-        if (mimeType) {
-          await this.registerContentType(sourcePath, mimeType);
-        }
-      }
-
-      // Add relationship with new ID
-      const newRelId = `rId${slideRels.length + 1}`;
-      relIdMapping.set(rel.Id, newRelId);
-
-      slideRels.push({
-        Id: newRelId,
-        Type: rel.Type,
-        Target: rel.Target,
-        TargetMode: rel.TargetMode
-      });
-    }
-
-    // Update r:id references in the slide content
-    this.updateRelIds(newSlide, relIdMapping);
-
-    return nextRelId;
-  }
-
-  /**
-   * Update relationship IDs in slide content
-   */
-  updateRelIds(obj, relIdMapping) {
-    if (!obj || typeof obj !== 'object') return;
-
-    if (Array.isArray(obj)) {
-      obj.forEach(item => this.updateRelIds(item, relIdMapping));
-      return;
-    }
-
-    for (const [key, value] of Object.entries(obj)) {
-      if (key === '$' && value && typeof value === 'object') {
-        // Check for r:id, r:embed, r:link attributes
-        for (const [attrKey, attrValue] of Object.entries(value)) {
-          if ((attrKey === 'r:id' || attrKey === 'r:embed' || attrKey === 'r:link') &&
-              typeof attrValue === 'string' && relIdMapping.has(attrValue)) {
-            value[attrKey] = relIdMapping.get(attrValue);
-          }
-        }
-      } else if (value && typeof value === 'object') {
-        this.updateRelIds(value, relIdMapping);
-      }
-    }
-  }
-
-  /**
    * Post-migration cleanup
    */
   async postMigrationCleanup() {
-    // Ensure Content_Types.xml is complete
     await this.syncContentTypes();
-
-    // Remove orphaned media files (optional - keeping for safety)
-    // await this.removeOrphanedMedia();
   }
 
   /**
    * Sync Content_Types.xml
    */
   async syncContentTypes() {
-    const contentTypesXml = await this.parseXmlFile(this.outputZip, '[Content_Types].xml');
-    if (!contentTypesXml) return;
+    let contentTypesStr = await this.outputZip.file('[Content_Types].xml').async('string');
 
-    const types = contentTypesXml['Types'] || contentTypesXml;
-
-    // Ensure required extensions are present
+    // Ensure common extensions are present
     const defaultTypes = [
-      { Extension: 'rels', ContentType: 'application/vnd.openxmlformats-package.relationships+xml' },
-      { Extension: 'xml', ContentType: 'application/xml' },
-      { Extension: 'png', ContentType: 'image/png' },
-      { Extension: 'jpg', ContentType: 'image/jpeg' },
-      { Extension: 'jpeg', ContentType: 'image/jpeg' },
-      { Extension: 'gif', ContentType: 'image/gif' },
-      { Extension: 'svg', ContentType: 'image/svg+xml' },
-      { Extension: 'emf', ContentType: 'image/x-emf' },
-      { Extension: 'wmf', ContentType: 'image/x-wmf' }
+      { ext: 'rels', type: 'application/vnd.openxmlformats-package.relationships+xml' },
+      { ext: 'xml', type: 'application/xml' },
+      { ext: 'png', type: 'image/png' },
+      { ext: 'jpg', type: 'image/jpeg' },
+      { ext: 'jpeg', type: 'image/jpeg' },
+      { ext: 'gif', type: 'image/gif' },
+      { ext: 'emf', type: 'image/x-emf' },
+      { ext: 'wmf', type: 'image/x-wmf' }
     ];
 
-    let defaults = types['Default'] || [];
-    if (!Array.isArray(defaults)) defaults = [defaults];
-
     for (const dt of defaultTypes) {
-      const exists = defaults.some(d => d.$?.Extension === dt.Extension);
-      if (!exists) {
-        defaults.push({ $: dt });
+      if (!contentTypesStr.includes(`Extension="${dt.ext}"`)) {
+        contentTypesStr = contentTypesStr.replace(
+          '<Types ',
+          `<Types ><Default Extension="${dt.ext}" ContentType="${dt.type}"/`
+        ).replace('><Default', '>\n<Default');
       }
     }
 
-    types['Default'] = defaults;
-
-    await this.writeXmlFile(this.outputZip, '[Content_Types].xml', { Types: types });
+    this.outputZip.file('[Content_Types].xml', contentTypesStr);
   }
 
   /**
-   * Register a file in Content_Types.xml
+   * Ensure a file is registered in Content_Types.xml
    */
-  async registerContentType(filePath, contentType) {
-    const contentTypesXml = await this.parseXmlFile(this.outputZip, '[Content_Types].xml');
-    if (!contentTypesXml) return;
+  async ensureContentType(filePath, contentType = null) {
+    let contentTypesStr = await this.outputZip.file('[Content_Types].xml').async('string');
 
-    const types = contentTypesXml['Types'] || contentTypesXml;
-
-    // Normalize path for comparison
     const partName = filePath.startsWith('/') ? filePath : `/${filePath}`;
 
-    let overrides = types['Override'] || [];
-    if (!Array.isArray(overrides)) overrides = overrides ? [overrides] : [];
+    if (contentTypesStr.includes(`PartName="${partName}"`)) {
+      return; // Already registered
+    }
 
-    // Check if already registered
-    const exists = overrides.some(o => o.$?.PartName === partName);
-    if (!exists) {
-      overrides.push({
-        $: {
-          PartName: partName,
-          ContentType: contentType
-        }
-      });
-      types['Override'] = overrides;
-      await this.writeXmlFile(this.outputZip, '[Content_Types].xml', { Types: types });
+    if (!contentType) {
+      // Guess from extension
+      const ext = filePath.split('.').pop()?.toLowerCase();
+      const typeMap = {
+        'xml': 'application/xml',
+        'png': 'image/png',
+        'jpg': 'image/jpeg',
+        'jpeg': 'image/jpeg',
+        'gif': 'image/gif',
+        'emf': 'image/x-emf',
+        'wmf': 'image/x-wmf',
+        'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      };
+      contentType = typeMap[ext];
+    }
+
+    if (contentType) {
+      contentTypesStr = contentTypesStr.replace(
+        '</Types>',
+        `<Override PartName="${partName}" ContentType="${contentType}"/>
+</Types>`
+      );
+      this.outputZip.file('[Content_Types].xml', contentTypesStr);
     }
   }
 
@@ -975,7 +938,7 @@ export class PPTXMigrator {
    * Generate migration report
    */
   generateReport() {
-    const report = {
+    return {
       source: {
         slideCount: this.sourceAnalysis.slides.length,
         slideSize: this.sourceAnalysis.slideSize,
@@ -998,11 +961,9 @@ export class PPTXMigrator {
       warnings: this.warnings,
       slidesWithNotes: this.sourceAnalysis.slides.filter(s => s.notes).length
     };
-
-    return report;
   }
 
-  // ============ Utility Methods ============
+  // ============ XML Helper Methods ============
 
   /**
    * Parse XML file from ZIP
@@ -1013,7 +974,7 @@ export class PPTXMigrator {
 
     const content = await file.async('string');
     try {
-      return await parseStringPromise(content, XML_PARSER_OPTIONS);
+      return this.parser.parse(content);
     } catch (e) {
       console.error(`Failed to parse ${path}:`, e.message);
       return null;
@@ -1021,86 +982,142 @@ export class PPTXMigrator {
   }
 
   /**
-   * Write XML file to ZIP
+   * Build XML string from parsed object
    */
-  async writeXmlFile(zip, path, obj) {
-    const builder = new Builder(XML_BUILDER_OPTIONS);
-    let xml = builder.buildObject(obj);
-
-    // Add XML declaration if missing
+  buildXml(obj) {
+    let xml = this.builder.build(obj);
     if (!xml.startsWith('<?xml')) {
       xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + xml;
     }
-
-    zip.file(path, xml);
+    return xml;
   }
 
   /**
-   * Write relationships file
+   * Find an element in parsed XML (preserveOrder format)
    */
-  async writeRelsFile(zip, path, rels) {
-    const relsObj = {
-      Relationships: {
-        $: {
-          'xmlns': 'http://schemas.openxmlformats.org/package/2006/relationships'
-        },
-        Relationship: rels.map(r => ({
-          $: {
-            Id: r.Id,
-            Type: r.Type,
-            Target: r.Target,
-            ...(r.TargetMode ? { TargetMode: r.TargetMode } : {})
+  findElement(parent, tagName) {
+    if (!parent) return null;
+
+    if (Array.isArray(parent)) {
+      for (const item of parent) {
+        if (item[tagName]) return item[tagName];
+        const found = this.findElement(item, tagName);
+        if (found) return found;
+      }
+      return null;
+    }
+
+    if (typeof parent === 'object') {
+      if (parent[tagName]) return parent[tagName];
+
+      for (const key of Object.keys(parent)) {
+        if (key === ':@' || key === '#text') continue;
+        const child = parent[key];
+        const found = this.findElement(child, tagName);
+        if (found) return found;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Find all elements with a given tag name
+   */
+  findAllElements(parent, tagName) {
+    const results = [];
+    if (!parent) return results;
+
+    const search = (node) => {
+      if (Array.isArray(node)) {
+        for (const item of node) {
+          if (item[tagName]) {
+            const elements = Array.isArray(item[tagName]) ? item[tagName] : [item[tagName]];
+            for (const el of elements) {
+              results.push({ ...el, ':@': item[':@'] });
+            }
           }
-        }))
+          search(item);
+        }
+      } else if (typeof node === 'object' && node !== null) {
+        if (node[tagName]) {
+          const elements = Array.isArray(node[tagName]) ? node[tagName] : [node[tagName]];
+          results.push(...elements);
+        }
+        for (const key of Object.keys(node)) {
+          if (key === ':@' || key === '#text') continue;
+          search(node[key]);
+        }
       }
     };
 
-    await this.writeXmlFile(zip, path, relsObj);
+    search(parent);
+    return results;
   }
 
   /**
-   * Normalize relationships from parsed XML
+   * Get attributes from an element (preserveOrder format)
    */
-  normalizeRels(relsXml) {
+  getAttributes(element) {
+    if (!element) return {};
+
+    // In preserveOrder mode, attributes are in :@ property
+    if (element[':@']) {
+      const attrs = {};
+      for (const [key, value] of Object.entries(element[':@'])) {
+        // Remove @_ prefix
+        const cleanKey = key.startsWith('@_') ? key.substring(2) : key;
+        attrs[cleanKey] = value;
+      }
+      return attrs;
+    }
+
+    // Fallback: check for @_ prefixed properties directly
+    const attrs = {};
+    for (const [key, value] of Object.entries(element)) {
+      if (key.startsWith('@_')) {
+        attrs[key.substring(2)] = value;
+      }
+    }
+    return attrs;
+  }
+
+  /**
+   * Get text content from an element
+   */
+  getTextContent(element) {
+    if (!element) return '';
+    if (typeof element === 'string') return element;
+
+    if (Array.isArray(element)) {
+      for (const item of element) {
+        if (item['#text']) return item['#text'];
+      }
+      return '';
+    }
+
+    if (element['#text']) return element['#text'];
+    return '';
+  }
+
+  /**
+   * Parse relationships from a .rels file
+   */
+  parseRels(relsXml) {
     if (!relsXml) return [];
 
-    const relationships = relsXml.Relationships || relsXml;
-    let rels = relationships.Relationship || relationships['Relationship'] || [];
+    const relationships = this.findElement(relsXml, 'Relationships');
+    const relElements = this.findAllElements(relationships || relsXml, 'Relationship');
 
-    if (!Array.isArray(rels)) rels = rels ? [rels] : [];
-
-    return rels.map(r => ({
-      Id: r.$?.Id || r.Id,
-      Type: r.$?.Type || r.Type,
-      Target: r.$?.Target || r.Target,
-      TargetMode: r.$?.TargetMode || r.TargetMode
-    })).filter(r => r.Id && r.Type);
-  }
-
-  /**
-   * Get MIME type for file extension
-   */
-  getMimeType(ext) {
-    const mimeTypes = {
-      'png': 'image/png',
-      'jpg': 'image/jpeg',
-      'jpeg': 'image/jpeg',
-      'gif': 'image/gif',
-      'svg': 'image/svg+xml',
-      'emf': 'image/x-emf',
-      'wmf': 'image/x-wmf',
-      'xml': 'application/xml',
-      'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-    };
-    return mimeTypes[ext] || null;
-  }
-
-  /**
-   * Get migration plan for preview
-   */
-  getMigrationPlan() {
-    return this.migrationPlan;
+    return relElements.map(rel => {
+      const attrs = this.getAttributes(rel);
+      return {
+        Id: attrs.Id,
+        Type: attrs.Type,
+        Target: attrs.Target,
+        TargetMode: attrs.TargetMode
+      };
+    }).filter(r => r.Id && r.Type);
   }
 }
 
