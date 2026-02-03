@@ -303,11 +303,12 @@ def process_slides():
         if filename == 'slide1.xml':
             content = remove_warning_boxes(content)
 
-        # Add title placeholder to text boxes with "Titel" text
-        content = add_placeholder_to_textbox(content, 'Titel', 'ctrTitle')
+        # DISABLED - placeholder additions may cause corruption
+        # # Add title placeholder to text boxes with "Titel" text
+        # content = add_placeholder_to_textbox(content, 'Titel', 'ctrTitle')
 
-        # Add subtitle placeholder to text boxes with "Subtitel" text
-        content = add_placeholder_to_textbox(content, 'Subtitel', 'subTitle')
+        # # Add subtitle placeholder to text boxes with "Subtitel" text
+        # content = add_placeholder_to_textbox(content, 'Subtitel', 'subTitle')
 
         # Disabled - body placeholders cause corruption
         # # For slides 13 and 14, add body placeholder (most used template slides)
